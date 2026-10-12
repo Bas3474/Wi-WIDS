@@ -1,0 +1,282 @@
+"""Detection rules (Phase 2)
+
+ไม่พึ่ง pydantic/scapy เพื่อให้ทดสอบด้วย unit test ล้วน ๆ ได้
+ทุก detector รับ Event ทีละตัว (feed) แล้วคืน list ของ Detection
+เวลาอ้างอิงจาก Event.ts เสมอ (ไม่ใช้ time.time()) เพื่อให้ replay pcap/ทดสอบได้
+"""
+from __future__ import annotations
+
+import ipaddress
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+
+BROADCAST = "FF:FF:FF:FF:FF:FF"
+
+# ค่าต้องตรงกับ schemas.AttackType / Severity / Layer
+DEAUTH = "Deauth Attack"
+EVIL_TWIN = "Evil Twin"
+MITM = "MITM"
+WPA_CRACK = "WPA Key Cracking"
+RECON = "Recon / Probe Flood"
+CAPTIVE = "Captive Portal Phishing"
+CRITICAL, SUSPICIOUS = "Critical", "Suspicious"
+L2, L3, DNS = "802.11", "ARP/IP", "DNS"
+
+# kind ของ Event ที่ระบบรู้จัก (sensor ภายนอกอย่าง ESP32 ก็ใช้ชุดเดียวกัน)
+KINDS = {"deauth", "beacon", "probe_req", "auth", "eapol", "arp", "dns"}
+
+
+@dataclass
+class Event:
+    kind: str
+    ts: float
+    src: str = ""      # MAC ต้นทาง (arp/dns: dns ใช้ IP ของ resolver)
+    dst: str = ""
+    bssid: str = ""
+    ssid: str = ""
+    channel: int = 0
+    rssi: int = 0
+    extra: dict = field(default_factory=dict)
+
+
+@dataclass
+class Detection:
+    attack_type: str
+    severity: str
+    layer: str
+    src_mac: str
+    bssid: str
+    ssid: str
+    victim_count: int
+    channel: int
+    rssi: int
+    frame_rate: float
+    impact: str
+    action: str
+
+
+def norm_mac(m: str) -> str:
+    return (m or "").upper()
+
+
+class Detector:
+    cooldown = 30.0
+
+    def __init__(self, cooldown: float | None = None):
+        if cooldown is not None:
+            self.cooldown = cooldown
+        self._last: dict = {}
+
+    def _ready(self, key, ts: float) -> bool:
+        """กันแจ้งซ้ำ key เดิมในช่วง cooldown"""
+        if ts - self._last.get(key, float("-inf")) < self.cooldown:
+            return False
+        self._last[key] = ts
+        return True
+
+    def feed(self, ev: Event) -> list[Detection]:
+        raise NotImplementedError
+
+
+def _slide(q: deque, ts: float, window: float) -> None:
+    while q and ts - q[0][0] > window:
+        q.popleft()
+
+
+def _gc(table: dict, ts: float, window: float, limit: int = 5000) -> None:
+    """MAC ปลอมสุ่มจำนวนมากไม่ควรทำให้หน่วยความจำโต"""
+    if len(table) <= limit:
+        return
+    for k in [k for k, q in table.items() if not q or ts - q[-1][0] > window]:
+        del table[k]
+
+
+class DeauthDetector(Detector):
+    """1. Deauth/Disassoc ต่อ (src, bssid) เกิน threshold ใน window วินาที"""
+
+    def __init__(self, window=5.0, threshold=20, cooldown=None):
+        super().__init__(cooldown)
+        self.window, self.threshold = window, threshold
+        self.win: dict = defaultdict(deque)
+
+    def feed(self, ev):
+        if ev.kind != "deauth":
+            return []
+        key = (norm_mac(ev.src), norm_mac(ev.bssid))
+        q = self.win[key]
+        q.append((ev.ts, norm_mac(ev.dst), ev.rssi, ev.channel))
+        _slide(q, ev.ts, self.window)
+        _gc(self.win, ev.ts, self.window)
+        if len(q) < self.threshold or not self._ready(key, ev.ts):
+            return []
+        victims = {d for _, d, _, _ in q if d != BROADCAST}
+        bcast = any(d == BROADCAST for _, d, _, _ in q)
+        return [Detection(
+            DEAUTH, CRITICAL, L2, key[0], key[1], ev.ssid,
+            max(len(victims), 1 if bcast else 0), ev.channel, ev.rssi,
+            round(len(q) / self.window, 1),
+            "Client ถูกตัดการเชื่อมต่อซ้ำ ๆ" + (" (broadcast ทั้ง BSS)" if bcast else ""),
+            "ตรวจสอบต้นทาง MAC, เปิดใช้ 802.11w (PMF)")]
+
+
+class EvilTwinDetector(Detector):
+    """2. Beacon ของ SSID ที่เฝ้าระวัง แต่ BSSID/Channel ไม่อยู่ใน profile"""
+
+    def __init__(self, profiles: list[dict], cooldown=None):
+        super().__init__(cooldown)
+        self.profiles = {p["ssid"]: p for p in profiles}
+
+    def feed(self, ev):
+        if ev.kind != "beacon":
+            return []
+        prof = self.profiles.get(ev.ssid)
+        if not prof:
+            return []
+        bssid = norm_mac(ev.bssid or ev.src)
+        allowed = {norm_mac(b) for b in prof.get("bssids", [])}
+        chans = prof.get("channels", [])
+        bad_bssid = bool(allowed) and bssid not in allowed
+        bad_chan = bool(chans) and ev.channel and ev.channel not in chans
+        if not (bad_bssid or bad_chan) or not self._ready(bssid, ev.ts):
+            return []
+        why = "BSSID ไม่อยู่ใน profile" if bad_bssid else f"อยู่ช่อง {ev.channel} ผิดจาก profile"
+        return [Detection(
+            EVIL_TWIN, CRITICAL, L2, bssid, bssid, ev.ssid, 0, ev.channel, ev.rssi, 0.0,
+            f"พบ AP ปลอมใช้ SSID '{ev.ssid}' ({why}) Client อาจถูกหลอกให้เชื่อมต่อ",
+            "แจ้งผู้ใช้ไม่ให้เชื่อมต่อ, หาตำแหน่ง AP ปลอมจาก RSSI")]
+
+
+class ReconDetector(Detector):
+    """5. Probe Request ถี่จาก MAC เดียว"""
+
+    def __init__(self, window=10.0, threshold=40, cooldown=None):
+        super().__init__(cooldown)
+        self.window, self.threshold = window, threshold
+        self.win: dict = defaultdict(deque)
+
+    def feed(self, ev):
+        if ev.kind != "probe_req":
+            return []
+        key = norm_mac(ev.src)
+        q = self.win[key]
+        q.append((ev.ts, ev.ssid, ev.rssi, ev.channel))
+        _slide(q, ev.ts, self.window)
+        _gc(self.win, ev.ts, self.window)
+        if len(q) < self.threshold or not self._ready(key, ev.ts):
+            return []
+        ssids = {s for _, s, _, _ in q if s}
+        return [Detection(
+            RECON, SUSPICIOUS, L2, key, "", "", 0, ev.channel, ev.rssi,
+            round(len(q) / self.window, 1),
+            f"สแกนหา AP/Client ถี่ผิดปกติ ({len(ssids)} SSID ที่ต่างกัน)",
+            "เฝ้าระวัง, บันทึก MAC ต้นทาง")]
+
+
+class WpaCrackDetector(Detector):
+    """4. EAPOL ซ้ำต่อ BSSID — เชื่อมกับ Deauth ล่าสุด (correlation) เพื่อลด false positive"""
+
+    def __init__(self, window=30.0, threshold=8, threshold_no_deauth=24, cooldown=None):
+        super().__init__(cooldown)
+        self.window, self.threshold = window, threshold
+        self.threshold_no_deauth = threshold_no_deauth
+        self.eapol: dict = defaultdict(deque)
+        self.last_deauth: dict = {}
+
+    def feed(self, ev):
+        bssid = norm_mac(ev.bssid)
+        if ev.kind == "deauth":
+            self.last_deauth[bssid] = ev.ts
+            return []
+        if ev.kind != "eapol":
+            return []
+        q = self.eapol[bssid]
+        q.append((ev.ts, norm_mac(ev.src)))
+        _slide(q, ev.ts, self.window)
+        _gc(self.eapol, ev.ts, self.window)
+        correlated = ev.ts - self.last_deauth.get(bssid, float("-inf")) <= self.window
+        need = self.threshold if correlated else self.threshold_no_deauth
+        if len(q) < need or not self._ready(bssid, ev.ts):
+            return []
+        clients = {m for _, m in q}
+        return [Detection(
+            WPA_CRACK, SUSPICIOUS, L2, bssid, bssid, ev.ssid, len(clients), ev.channel,
+            ev.rssi, round(len(q) / self.window, 1),
+            "EAPOL handshake ซ้ำในเวลาสั้น" + (" หลังเกิด Deauth (รูปแบบการดักจับ handshake)" if correlated else ""),
+            "เปลี่ยนรหัสผ่าน Wi-Fi ให้ซับซ้อน, เปิด WPA3 ถ้าทำได้")]
+
+
+class ArpDetector(Detector):
+    """3. MITM (ARP poisoning): IP เดียวกันแต่ MAC เปลี่ยน / gateway MAC ไม่ตรง config
+    ต้องการ Event 'arp' จาก sensor ที่เชื่อมต่อเครือข่ายจริง (card ตัวที่ 2 หรือ ESP32)
+    extra: {"ip": "192.168.1.1", "op": 1|2}
+    """
+
+    def __init__(self, gateway_ip="", gateway_mac="", cooldown=None):
+        super().__init__(cooldown)
+        self.gateway_ip = gateway_ip
+        self.gateway_mac = norm_mac(gateway_mac)
+        self.table: dict[str, str] = {}
+
+    def feed(self, ev):
+        if ev.kind != "arp":
+            return []
+        ip, mac = ev.extra.get("ip", ""), norm_mac(ev.src)
+        if not ip or ip == "0.0.0.0" or not mac:
+            return []
+        is_gw = bool(self.gateway_ip) and ip == self.gateway_ip
+        pinned_bad = is_gw and bool(self.gateway_mac) and mac != self.gateway_mac
+        previous = self.table.get(ip)
+        self.table[ip] = mac
+        conflict = previous is not None and previous != mac
+        if not (conflict or pinned_bad) or not self._ready((ip, mac), ev.ts):
+            return []
+        sev = CRITICAL if is_gw else SUSPICIOUS
+        return [Detection(
+            MITM, sev, L3, mac, ev.bssid, ev.ssid, 1, ev.channel, ev.rssi, 0.0,
+            f"IP {ip} ถูกอ้างโดย MAC ใหม่ (เดิม {previous or self.gateway_mac})"
+            + (" — เป็น gateway: traffic อาจถูกดักผ่านเครื่องผู้โจมตี" if is_gw else " (heuristic: อาจเป็น DHCP ออก IP ซ้ำ)"),
+            "ตรวจ ARP table ของ gateway, ใช้ static ARP / Dynamic ARP Inspection")]
+
+
+def _is_private(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
+
+
+class DnsDetector(Detector):
+    """6. DNS ปลอม / Captive Portal Phishing
+    extra: {"qname": "example.com", "answers": ["1.2.3.4"]}, src = IP ของ resolver ที่ตอบ
+    กฎ: (ก) คำตอบไม่อยู่ใน dns_expected → Critical  (ข) resolver ไม่อยู่ใน trusted_resolvers → Critical
+        (ค) โดเมนสาธารณะตอบเป็น IP private → Suspicious (heuristic)
+    """
+
+    def __init__(self, expected: dict | None = None, trusted_resolvers: list | None = None,
+                 private_ok_suffixes=(".local", ".lan", ".home.arpa", ".internal"), cooldown=60.0):
+        super().__init__(cooldown)
+        self.expected = {k.lower(): set(v) for k, v in (expected or {}).items()}
+        self.trusted = set(trusted_resolvers or [])
+        self.private_ok = tuple(private_ok_suffixes)
+
+    def feed(self, ev):
+        if ev.kind != "dns":
+            return []
+        q = ev.extra.get("qname", "").rstrip(".").lower()
+        answers = ev.extra.get("answers", [])
+        if not q or not answers:
+            return []
+        reason, sev = None, SUSPICIOUS
+        if q in self.expected and any(a not in self.expected[q] for a in answers):
+            reason, sev = f"{q} ตอบ {answers} ไม่ตรงค่าที่คาดไว้", CRITICAL
+        elif self.trusted and ev.src not in self.trusted:
+            reason, sev = f"คำตอบ DNS มาจาก resolver ที่ไม่รู้จัก ({ev.src})", CRITICAL
+        elif q not in self.expected and not q.endswith(self.private_ok) and any(_is_private(a) for a in answers):
+            reason = f"โดเมนสาธารณะ {q} ถูกตอบเป็น IP ภายใน {answers} (อาจเป็น Captive Portal ปลอม)"
+        if not reason or not self._ready((q, ev.src), ev.ts):
+            return []
+        mac = norm_mac(ev.extra.get("mac", "")) or ev.src
+        return [Detection(
+            CAPTIVE, sev, DNS, mac, ev.bssid, ev.ssid, 1, ev.channel, ev.rssi, 0.0,
+            reason + " (heuristic)",
+            "ตรวจ DNS/DHCP ของเครือข่าย, ปิด AP/Resolver ปลอม, แจ้งผู้ใช้อย่ากรอกรหัสผ่าน")]

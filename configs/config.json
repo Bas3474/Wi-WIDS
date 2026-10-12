@@ -1,0 +1,40 @@
+{
+  "interface": "wlp2s0",
+  "net_interface": "",
+  "channels": [
+    1,
+    6,
+    11
+  ],
+  "hop_interval_sec": 0.4,
+  "profiles": [
+    {
+      "ssid": "Yes_Yes_Yes",
+      "bssids": [
+        "BE:27:7A:AC:81:06"
+      ],
+      "channels": []
+    }
+  ],
+  "network": {
+    "gateway_ip": "192.168.1.1",
+    "gateway_mac": "",
+    "trusted_resolvers": [],
+    "dns_expected": {}
+  },
+  "thresholds": {
+    "deauth": {
+      "window": 5.0,
+      "threshold": 20
+    },
+    "recon": {
+      "window": 10.0,
+      "threshold": 40
+    },
+    "wpa": {
+      "window": 30.0,
+      "threshold": 8,
+      "threshold_no_deauth": 24
+    }
+  }
+}

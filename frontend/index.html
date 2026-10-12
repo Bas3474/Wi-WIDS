@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wi-Fi Micro-WIDS</title>
+<!-- ทำงานแบบ Offline ได้ 100% แม้การ์ดจะอยู่ใน Monitor Mode หรือไม่มีเน็ต -->
+<link rel="icon" href="data:,">
+<style>
+  [v-cloak] { display: none !important; }
+</style>
+<script src="/static/tailwind.js"></script>
+<script src="/static/vue.global.prod.js"></script>
+<script src="/static/chart.umd.min.js"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen">
+<div id="app" v-cloak class="max-w-6xl mx-auto p-4 space-y-4">
+
+  <header class="flex flex-wrap items-center justify-between gap-2">
+    <h1 class="text-xl font-bold">📡 Wi-Fi Micro-WIDS</h1>
+    <div class="flex items-center gap-3 text-sm">
+      <span :class="connected ? 'text-green-400' : 'text-red-400'">● {{ connected ? 'Connected' : 'Disconnected' }}</span>
+      <span class="px-2 py-0.5 rounded bg-slate-700">mode: {{ mode }}</span>
+      <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" v-model="muted"> 🔇 Mute</label>
+    </div>
+  </header>
+
+  <!-- Sensor nodes status bar -->
+  <section class="bg-slate-800/90 border border-slate-700/70 rounded-lg px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-sm">
+    <div class="flex flex-wrap items-center gap-2">
+      <span class="text-xs text-slate-400 font-semibold uppercase tracking-wider mr-1">Active Sensors:</span>
+      <span class="px-2.5 py-1 rounded bg-slate-700/80 border border-slate-600 flex items-center gap-1.5 text-xs text-slate-200">
+        <span class="w-2 h-2 rounded-full" :class="mode === 'live' ? 'bg-emerald-400 animate-pulse' : 'bg-slate-400'"></span>
+        💻 Laptop Sniffer
+      </span>
+      <template v-for="s in sensors" :key="s.name">
+        <span class="px-2.5 py-1 rounded flex items-center gap-1.5 text-xs font-mono"
+              :class="s.online ? 'bg-indigo-900/70 border border-indigo-500/50 text-indigo-200' : 'bg-slate-800 border border-slate-700 text-slate-400'">
+          <span class="w-2 h-2 rounded-full" :class="s.online ? 'bg-emerald-400' : 'bg-red-400'"></span>
+          📡 {{ s.name }} ({{ s.total }} events)
+        </span>
+      </template>
+      <span v-if="!sensors.length" class="text-xs text-amber-400/90 italic flex items-center gap-1">
+        ⚠️ ยังไม่มีข้อมูลจาก ESP32 (รอส่งเข้า /api/ingest)
+      </span>
+    </div>
+    <div class="text-xs text-slate-400">
+      Total Ingested: <span class="text-slate-200 font-mono font-bold">{{ totalSensorEvents }}</span>
+    </div>
+  </section>
+
+  <!-- Summary cards -->
+  <section class="grid grid-cols-2 md:grid-cols-4 gap-3">
+    <div class="rounded-lg p-4" :class="statusClass">
+      <div class="text-xs opacity-80">System Threat Status</div>
+      <div class="text-2xl font-bold">{{ threatStatus }}</div>
+    </div>
+    <div class="bg-slate-800 rounded-lg p-4"><div class="text-xs text-slate-400">Total</div><div class="text-2xl font-bold">{{ total }}</div></div>
+    <div class="bg-slate-800 rounded-lg p-4"><div class="text-xs text-slate-400">Critical</div><div class="text-2xl font-bold text-red-400">{{ counts.Critical || 0 }}</div></div>
+    <div class="bg-slate-800 rounded-lg p-4"><div class="text-xs text-slate-400">Suspicious</div><div class="text-2xl font-bold text-yellow-400">{{ counts.Suspicious || 0 }}</div></div>
+  </section>
+
+  <div class="grid md:grid-cols-3 gap-4">
+    <!-- Chart -->
+    <section class="bg-slate-800 rounded-lg p-4">
+      <h2 class="font-semibold mb-2">Frame Breakdown (สะสมช่วงที่เปิดหน้านี้)</h2>
+      <canvas id="chart" height="220"></canvas>
+    </section>
+
+    <!-- Feed -->
+    <section class="bg-slate-800 rounded-lg p-4 md:col-span-2">
+      <div class="flex flex-wrap gap-2 mb-3">
+        <input v-model="query" @input="loadIncidents" placeholder="ค้นหา (ประเภท / MAC / SSID / Sensor / ระดับ)"
+               class="flex-1 min-w-[10rem] bg-slate-900 rounded px-3 py-1.5 text-sm">
+        <a :href="'/api/export.csv' + (query ? '?q=' + encodeURIComponent(query) : '')"
+           class="bg-blue-600 hover:bg-blue-500 rounded px-3 py-1.5 text-sm">⬇ CSV</a>
+        <button @click="simulate" class="bg-slate-600 hover:bg-slate-500 rounded px-3 py-1.5 text-sm">+ จำลองเหตุการณ์</button>
+      </div>
+      <div class="overflow-x-auto max-h-96 overflow-y-auto">
+        <table class="w-full text-sm">
+          <thead class="text-left text-slate-400 sticky top-0 bg-slate-800">
+            <tr>
+              <th class="py-1">เวลา</th>
+              <th>ประเภท</th>
+              <th>ระดับ</th>
+              <th>Sensor ที่ตรวจพบ</th>
+              <th>Source MAC</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="i in incidents" :key="i.id" @click="selected = i"
+                class="border-t border-slate-700 hover:bg-slate-700 cursor-pointer">
+              <td class="py-1.5 whitespace-nowrap">{{ fmt(i.timestamp) }}</td>
+              <td>{{ i.attack_type }}</td>
+              <td><span class="px-2 rounded text-xs" :class="badge(i.severity)">{{ i.severity }}</span></td>
+              <td>
+                <span class="px-2 py-0.5 rounded text-xs font-mono" :class="sourceBadge(i.source)">
+                  {{ formatSource(i.source) }}
+                </span>
+              </td>
+              <td class="font-mono text-xs">{{ i.src_mac }}</td>
+            </tr>
+            <tr v-if="!incidents.length"><td colspan="5" class="py-6 text-center text-slate-500">ยังไม่มีเหตุการณ์</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <!-- Detail modal -->
+  <div v-if="selected" class="fixed inset-0 bg-black/60 flex items-center justify-center p-4" @click.self="selected = null">
+    <div class="bg-slate-800 rounded-lg p-5 w-full max-w-md space-y-2">
+      <div class="flex justify-between items-center">
+        <h3 class="text-lg font-bold">{{ selected.attack_type }}</h3>
+        <button @click="selected = null" class="text-slate-400 text-xl">✕</button>
+      </div>
+      <span class="px-2 rounded text-xs" :class="badge(selected.severity)">{{ selected.severity }}</span>
+      <span class="ml-2 text-xs text-slate-400">layer: {{ selected.layer }}<template v-if="selected.layer !== '802.11'"> (heuristic)</template></span>
+      <dl class="grid grid-cols-3 gap-y-1 text-sm pt-2">
+        <dt class="text-slate-400">ตรวจพบโดย</dt>
+        <dd class="col-span-2">
+          <span class="px-2 py-0.5 rounded text-xs font-mono" :class="sourceBadge(selected.source)">
+            {{ formatSource(selected.source) }}
+          </span>
+        </dd>
+        <dt class="text-slate-400">เวลา</dt><dd class="col-span-2">{{ new Date(selected.timestamp*1000).toLocaleString() }}</dd>
+        <dt class="text-slate-400">Source MAC</dt><dd class="col-span-2 font-mono">{{ selected.src_mac }}</dd>
+        <dt class="text-slate-400">SSID / BSSID</dt><dd class="col-span-2">{{ selected.ssid }} / <span class="font-mono">{{ selected.bssid }}</span></dd>
+        <dt class="text-slate-400">Victims</dt><dd class="col-span-2">{{ selected.victim_count }}</dd>
+        <dt class="text-slate-400">Channel</dt><dd class="col-span-2">{{ selected.channel }}</dd>
+        <dt class="text-slate-400">RSSI</dt><dd class="col-span-2">{{ selected.rssi }} dBm</dd>
+        <dt class="text-slate-400">Frame rate</dt><dd class="col-span-2">{{ selected.frame_rate }} /s</dd>
+        <dt class="text-slate-400">Impact</dt><dd class="col-span-2">{{ selected.impact }}</dd>
+        <dt class="text-slate-400">Action</dt><dd class="col-span-2">{{ selected.action }}</dd>
+      </dl>
+    </div>
+  </div>
+</div>
+
+<script>
+const { createApp, ref, computed, onMounted, watch } = Vue;
+
+createApp({
+  setup() {
+    const incidents = ref([]), counts = ref({}), total = ref(0), mode = ref('-');
+    const connected = ref(false), muted = ref(false), query = ref(''), selected = ref(null);
+    const sensors = ref([]);
+    const frames = { Beacon: 0, Probe: 0, Auth: 0, Deauth: 0 };
+    let chart, ws, audioCtx;
+
+    const totalSensorEvents = computed(() => sensors.value.reduce((acc, s) => acc + (s.total || 0), 0));
+
+    const threatStatus = computed(() => (counts.value.Critical || 0) && recentCritical.value ? 'Critical'
+      : (counts.value.Suspicious || 0) || (counts.value.Critical || 0) ? 'Suspicious' : 'Normal');
+    // Critical ภายใน 60 วินาทีล่าสุด = สถานะ Critical, ไม่งั้นลดระดับ
+    const now = ref(Date.now() / 1000); setInterval(() => now.value = Date.now() / 1000, 1000);
+    const recentCritical = computed(() => incidents.value.some(i => i.severity === 'Critical' && now.value - i.timestamp < 60));
+    const statusClass = computed(() => ({ Normal: 'bg-green-700', Suspicious: 'bg-yellow-600', Critical: 'bg-red-700 animate-pulse' }[threatStatus.value]));
+    const badge = s => ({ Critical: 'bg-red-600', Suspicious: 'bg-yellow-600 text-black', Normal: 'bg-green-700' }[s]);
+    const fmt = t => new Date(t * 1000).toLocaleTimeString();
+
+    function formatSource(src) {
+      if (!src || src === 'live') return '💻 Laptop';
+      if (src.startsWith('sensor:')) return '📡 ' + src.replace('sensor:', '');
+      if (src === 'mock') return '🧪 Mock';
+      return src;
+    }
+
+    function sourceBadge(src) {
+      if (!src || src === 'live') return 'bg-cyan-900/60 text-cyan-200 border border-cyan-700/60';
+      if (src.startsWith('sensor:')) return 'bg-indigo-900/60 text-indigo-200 border border-indigo-500/60';
+      if (src === 'mock') return 'bg-slate-700 text-slate-300';
+      return 'bg-slate-700 text-slate-300';
+    }
+
+    function beep() {
+      if (muted.value) return;
+      try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        const o = audioCtx.createOscillator(); o.frequency.value = 880;
+        o.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.25);
+      } catch (e) {}
+    }
+
+    async function loadStatus() {
+      const s = await (await fetch('/api/status')).json();
+      counts.value = s.counts; total.value = s.total; mode.value = s.mode;
+      if (s.sensors) sensors.value = s.sensors;
+    }
+    async function loadIncidents() {
+      incidents.value = await (await fetch('/api/incidents?q=' + encodeURIComponent(query.value))).json();
+    }
+    async function simulate() { await fetch('/api/simulate', { method: 'POST' }); }
+
+    function connect() {
+      ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+      ws.onopen = () => { connected.value = true; loadStatus(); loadIncidents(); };
+      ws.onclose = () => { connected.value = false; setTimeout(connect, 2000); };  // auto-reconnect
+      ws.onmessage = e => {
+        const m = JSON.parse(e.data);
+        if (m.type === 'frames') {
+          for (const k in m.data) frames[k] += m.data[k];
+          chart.data.datasets[0].data = Object.values(frames); chart.update('none');
+          if (m.sensors) sensors.value = m.sensors;
+        } else if (m.type === 'incident') {
+          if (!query.value) incidents.value.unshift(m.data);
+          counts.value[m.data.severity] = (counts.value[m.data.severity] || 0) + 1;
+          total.value++;
+          if (m.data.severity === 'Critical') beep();
+        }
+      };
+    }
+
+    onMounted(() => {
+      chart = new Chart(document.getElementById('chart'), {
+        type: 'doughnut',
+        data: { labels: Object.keys(frames), datasets: [{ data: Object.values(frames),
+          backgroundColor: ['#3b82f6', '#a855f7', '#22c55e', '#ef4444'] }] },
+        options: { plugins: { legend: { labels: { color: '#e2e8f0' } } } },
+      });
+      connect();
+    });
+
+    return { incidents, counts, total, mode, connected, muted, query, selected,
+             sensors, totalSensorEvents, formatSource, sourceBadge,
+             threatStatus, statusClass, badge, fmt, loadIncidents, simulate };
+  },
+}).mount('#app');
+</script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+.env
+configs/.env
+*.db
+__pycache__/
+venv/
+.venv/
+firmware/**/config.h
+.pio/
