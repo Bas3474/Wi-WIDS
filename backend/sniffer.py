@@ -107,8 +107,11 @@ class MonitorSniffer(_Capture):
         while not self._stop_evt.wait(self.hop_interval):
             ch = self.channels[i % len(self.channels)]
             i += 1
-            subprocess.run(["iw", "dev", self.iface, "set", "channel", str(ch)],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                subprocess.run(["iw", "dev", self.iface, "set", "channel", str(ch)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                break
 
     def run(self):
         if len(self.channels) > 1:
@@ -122,14 +125,22 @@ class NetSniffer(_Capture):
 
 
 def start_all(engine, cfg: dict) -> list:
-    """เริ่ม sniffer ตาม config; คืน list ของ thread เพื่อสั่ง stop ตอนปิดระบบ"""
+    """เริ่ม sniffer ตาม config; บน Windows หรือไม่ได้เปิด Monitor Mode จะข้ามอย่างปลอดภัยเพื่อรอรับจาก ESP32"""
+    import os
+    from pathlib import Path
     threads = []
-    if cfg.get("interface"):
-        threads.append(MonitorSniffer(cfg["interface"], engine, cfg.get("channels", [1, 6, 11]),
-                                      cfg.get("hop_interval_sec", 0.4)))
+    iface = cfg.get("interface", "").strip()
+    if os.name == "nt":
+        log.info("โหมด Windows: ข้าม Monitor Mode ในเครื่อง (รอรับข้อมูลจาก ESP32 ผ่าน /api/ingest)")
+    elif iface:
+        if Path(f"/sys/class/net/{iface}").exists():
+            threads.append(MonitorSniffer(iface, engine, cfg.get("channels", [1, 6, 11]),
+                                          cfg.get("hop_interval_sec", 0.4)))
+        else:
+            log.info("ไม่พบ interface '%s' ในเครื่อง -> รอรับข้อมูลจาก ESP32 ผ่าน /api/ingest", iface)
     else:
-        log.warning("ไม่ได้ตั้ง 'interface' ใน config.json -> ไม่ดักจับ 802.11")
-    if cfg.get("net_interface"):
+        log.info("ไม่ได้ตั้ง 'interface' ใน config.json -> รอรับข้อมูลจาก ESP32 ผ่าน /api/ingest")
+    if cfg.get("net_interface") and os.name != "nt":
         threads.append(NetSniffer(cfg["net_interface"], engine))
     for t in threads:
         t.start()
