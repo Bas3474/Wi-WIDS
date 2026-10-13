@@ -63,6 +63,23 @@ class TestEvilTwin(unittest.TestCase):
     def test_other_ssid_ignored(self):
         self.assertEqual(EvilTwinDetector(self.prof).feed(Event("beacon", 1, "1:2", bssid="1:2", ssid="Other", channel=1)), [])
 
+    def test_dynamic_rogue_bssid_without_profile(self):
+        # ตรวจพบ AP ปลอมอัตโนมัติแม้ไม่ได้ตั้ง profile ล่วงหน้า
+        d = EvilTwinDetector([])
+        self.assertEqual(d.feed(Event("beacon", 1, AP, bssid=AP, ssid="MyHome")), [])
+        out = d.feed(Event("beacon", 2, "EE:EE:EE:EE:EE:EE", bssid="EE:EE:EE:EE:EE:EE", ssid="MyHome"))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].attack_type, "Evil Twin")
+
+    def test_airgeddon_evil_twin_with_deauth_correlated(self):
+        # จำลอง airgeddon: ปล่อย Rogue AP พร้อมกับยิง Deauth ตัดสัญญาณ AP จริง
+        d = EvilTwinDetector([])
+        d.feed(Event("beacon", 1, AP, bssid=AP, ssid="VictimAP"))
+        d.feed(Event("deauth", 2, "XX:XX:XX:XX:XX:XX", bssid=AP))
+        out = d.feed(Event("beacon", 3, "66:66:66:66:66:66", bssid="66:66:66:66:66:66", ssid="VictimAP"))
+        self.assertEqual(len(out), 1)
+        self.assertIn("airgeddon", out[0].impact)
+
 
 class TestRecon(unittest.TestCase):
     def test_probe_flood(self):
@@ -88,6 +105,13 @@ class TestWpa(unittest.TestCase):
     def test_eapol_without_deauth_needs_more(self):
         ev = [Event("eapol", i * 0.5, AP, bssid=AP) for i in range(10)]
         self.assertEqual(feed_all(WpaCrackDetector(), ev), [])
+
+    def test_airgeddon_single_handshake_capture(self):
+        # จำลอง airgeddon: ยิง Deauth แล้วเหยื่อ 1 รายส่ง 4-Way Handshake (4 เฟรม)
+        ev = [Event("deauth", 0, ATK, bssid=AP)] + [Event("eapol", 1 + i * 0.1, AP, bssid=AP) for i in range(4)]
+        out = feed_all(WpaCrackDetector(), ev)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].severity, "Critical")
 
 
 class TestArp(unittest.TestCase):

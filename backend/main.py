@@ -86,18 +86,43 @@ engine: Optional[Engine] = None
 active_sensors: dict[str, dict] = {}
 
 
-def record_sensor(name: str, accepted: int, online: Optional[bool] = None) -> None:
+def record_sensor(name: str, accepted: int, online: Optional[bool] = None, port: Optional[str] = None) -> None:
     now = time.time()
-    cur = active_sensors.get(name, {"events_total": 0})
+    # ใช้ port เป็น key หลัก เพื่อให้ 1 พอร์ตจริง มีรายการบน Dashboard เพียง 1 ตัวเสมอ
+    key = port if port else name
+    cur = active_sensors.get(key, {"events_total": 0})
     is_online = online if online is not None else True
-    active_sensors[name] = {
+    active_sensors[key] = {
+        "name": name,
+        "port": port,
         "last_seen": now,
-        "events_total": cur["events_total"] + accepted,
+        "events_total": cur.get("events_total", 0) + accepted,
         "last_count": accepted,
         "online": is_online,
     }
     if accepted > 0:
-        print(f"📡 [SENSOR] จาก {name}: รับ {accepted} events (รวมสะสม: {active_sensors[name]['events_total']})")
+        print(f"📡 [SENSOR] จาก {name}: รับ {accepted} events (รวมสะสม: {active_sensors[key]['events_total']})")
+
+
+def get_online_sensors(now: float) -> list[dict]:
+    """คืนเฉพาะเซนเซอร์ที่กำลังเชื่อมต่อและออนไลน์อยู่จริง กำจัดเซนเซอร์ผีทิ้ง"""
+    dead_keys = [
+        k for k, v in list(active_sensors.items())
+        if not v.get("online", False) or (now - v.get("last_seen", 0) > 15)
+    ]
+    for k in dead_keys:
+        active_sensors.pop(k, None)
+
+    return [
+        {
+            "name": v["name"],
+            "port": v.get("port") or "",
+            "online": True,
+            "total": v.get("events_total", 0),
+            "last_seen_sec": int(now - v["last_seen"]),
+        }
+        for k, v in active_sensors.items()
+    ]
 
 
 async def live_loop() -> None:
@@ -107,10 +132,7 @@ async def live_loop() -> None:
     while True:
         await asyncio.sleep(1)
         now = time.time()
-        s_list = [
-            {"name": k, "online": v.get("online", (now - v["last_seen"]) < 15), "total": v.get("events_total", 0), "last_seen_sec": int(now - v["last_seen"])}
-            for k, v in active_sensors.items()
-        ]
+        s_list = get_online_sensors(now)
         await hub.broadcast({"type": "frames", "data": engine.pop_frame_counts(), "sensors": s_list, "laptop_sniffer": has_laptop})
 
 
@@ -158,10 +180,7 @@ def status():
     now = time.time()
     cfg = load_config()
     has_laptop = bool(cfg.get("interface") and os.name != "nt")
-    sensors_info = [
-        {"name": k, "online": v.get("online", (now - v["last_seen"]) < 15), "total": v.get("events_total", 0), "last_seen_sec": int(now - v["last_seen"])}
-        for k, v in active_sensors.items()
-    ]
+    sensors_info = get_online_sensors(now)
     return {"mode": os.getenv("MODE", "mock"), "counts": c, "total": sum(c.values()),
             "line_configured": bool(os.getenv("LINE_CHANNEL_ACCESS_TOKEN")),
             "laptop_sniffer": has_laptop,
@@ -229,9 +248,12 @@ def ingest(body: IngestBody, x_token: Optional[str] = Header(None)):
 
     cur = active_sensors.get(body.sensor, {"events_total": 0})
     active_sensors[body.sensor] = {
+        "name": body.sensor,
+        "port": None,
         "last_seen": now,
-        "events_total": cur["events_total"] + accepted,
+        "events_total": cur.get("events_total", 0) + accepted,
         "last_count": accepted,
+        "online": True,
     }
     print(f"📡 [INGEST] จาก {body.sensor}: รับ {accepted} events (รวมสะสม: {active_sensors[body.sensor]['events_total']})")
     return {"accepted": accepted, "rejected": len(body.events) - accepted}

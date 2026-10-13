@@ -10,6 +10,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD_DIR = ROOT / "firmware" / ".pio" / "build" / "sniffer"
+BIN_DIR = ROOT / "firmware" / "bin" / "sniffer"
+
+
+def get_firmware_dir() -> Path:
+    if (BUILD_DIR / "firmware.bin").exists() and (BUILD_DIR / "bootloader.bin").exists() and (BUILD_DIR / "partitions.bin").exists():
+        return BUILD_DIR
+    if (BIN_DIR / "firmware.bin").exists() and (BIN_DIR / "bootloader.bin").exists() and (BIN_DIR / "partitions.bin").exists():
+        return BIN_DIR
+    return BUILD_DIR
 
 
 def find_esp32_port() -> str:
@@ -18,10 +27,31 @@ def find_esp32_port() -> str:
         for p in serial.tools.list_ports.comports():
             dev = p.device or ""
             desc = (p.description or "").lower()
+            hwid = (p.hwid or "").lower()
+
+            # ข้ามพอร์ตเสมือน Bluetooth และพอร์ตสื่อสารของเมนบอร์ด
             if dev.startswith("/dev/ttyS"):
                 continue
-            if (p.vid is not None or "usb" in dev.lower() or "acm" in dev.lower()
-                    or any(k in desc for k in ("cp210", "ch340", "ch910", "uart", "jtag", "esp", "serial", "ftdi"))):
+            if "bluetooth" in desc or "bth" in hwid or "bt" in desc.split():
+                continue
+            if "communications port" in desc or "standard modem" in desc:
+                continue
+
+            is_usb = (
+                p.vid is not None
+                or dev.startswith("/dev/ttyUSB")
+                or dev.startswith("/dev/ttyACM")
+                or "usb" in dev.lower()
+                or "usb" in desc
+                or "acm" in dev.lower()
+            )
+            is_esp_chip = any(k in desc or k in hwid for k in (
+                "cp210", "ch340", "ch341", "ch910", "ftdi", "espressif", "esp32", "uart", "jtag"
+            ))
+
+            if is_usb and (is_esp_chip or p.vid in (0x1A86, 0x10C4, 0x0403, 0x303A, 0x2341)):
+                return dev
+            elif is_usb and (dev.startswith("/dev/ttyUSB") or dev.startswith("/dev/ttyACM") or "usb-serial" in desc or "usb serial" in desc):
                 return dev
     except ImportError:
         pass
@@ -44,9 +74,10 @@ def main():
 
     print(f"✅ ตรวจพบ ESP32 เชื่อมต่ออยู่ที่พอร์ต: {port}")
 
-    bootloader = BUILD_DIR / "bootloader.bin"
-    partitions = BUILD_DIR / "partitions.bin"
-    firmware = BUILD_DIR / "firmware.bin"
+    fw_dir = get_firmware_dir()
+    bootloader = fw_dir / "bootloader.bin"
+    partitions = fw_dir / "partitions.bin"
+    firmware = fw_dir / "firmware.bin"
 
     # ลองใช้ esptool ก่อน
     esptool_cmd = None

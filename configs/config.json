@@ -31,12 +31,12 @@
     },
     "recon": {
       "window": 10.0,
-      "threshold": 40
+      "threshold": 25
     },
     "wpa": {
       "window": 30.0,
-      "threshold": 8,
-      "threshold_no_deauth": 24
+      "threshold": 2,
+      "threshold_no_deauth": 12
     }
   }
 }

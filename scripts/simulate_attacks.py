@@ -65,6 +65,7 @@ def send(url, token, name, events):
         print(f"{name:10s} -> {len(events):3d} events sent, server: {r.read().decode()}")
 
 
+if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("scenario", choices=[*SCENARIOS, "all"])
     ap.add_argument("--url", default="http://localhost:8000")

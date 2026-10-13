@@ -145,7 +145,7 @@ class SerialWorker(threading.Thread):
             with serial.Serial(self.port, self.baud, timeout=1.0) as ser:
                 print(f"🔌 [PLUGIN] เชื่อมต่อ ESP32 สำเร็จ! พอร์ต: {self.port}")
                 if self.on_sensor:
-                    self.on_sensor(self.sensor_name, 0, online=True)
+                    self.on_sensor(self.sensor_name, 0, online=True, port=self.port)
                 while not self._stop_evt.is_set():
                     raw_bytes = ser.readline()
                     if not raw_bytes:
@@ -160,7 +160,7 @@ class SerialWorker(threading.Thread):
             log.warning("🔌 [PLUGIN] พอร์ต %s หลุดการเชื่อมต่อ: %s", self.port, e)
         finally:
             if self.on_sensor:
-                self.on_sensor(self.sensor_name, 0, online=False)
+                self.on_sensor(self.sensor_name, 0, online=False, port=self.port)
             print(f"🔌 [PLUGIN] สิ้นสุดการเชื่อมต่อพอร์ต {self.port}")
 
     def _process_line(self, line: str) -> None:
@@ -174,7 +174,7 @@ class SerialWorker(threading.Thread):
         else:
             return
         data = json.loads(raw)
-        sensor = data.get("sensor") or self.sensor_name
+        sensor = data.get("sensor") or "esp32"
         self.sensor_name = f"{sensor} ({self.port})"
         events = data.get("events", [])
         now = time.time()
@@ -191,7 +191,7 @@ class SerialWorker(threading.Thread):
             )
             accepted += 1
         if self.on_sensor:
-            self.on_sensor(self.sensor_name, accepted, online=True)
+            self.on_sensor(self.sensor_name, accepted, online=True, port=self.port)
 
 
 class ESP32PluginManager(threading.Thread):
@@ -225,10 +225,32 @@ class ESP32PluginManager(threading.Thread):
         for p in serial.tools.list_ports.comports():
             dev = p.device or ""
             desc = (p.description or "").lower()
+            hwid = (p.hwid or "").lower()
+
+            # 1. ข้ามพอร์ต Linux serial ดั้งเดิม และพอร์ต Bluetooth บน Windows
             if dev.startswith("/dev/ttyS"):
                 continue
-            if (p.vid is not None or "usb" in dev.lower() or "acm" in dev.lower()
-                    or any(k in desc for k in ("cp210", "ch340", "ch910", "uart", "jtag", "esp", "serial", "ftdi"))):
+            if "bluetooth" in desc or "bth" in hwid or "bt" in desc.split():
+                continue
+            if "communications port" in desc or "standard modem" in desc:
+                continue
+
+            # 2. ต้องเป็นพอร์ต USB จริง หรือมีชิป USB-to-UART ของบอร์ด ESP32
+            is_usb = (
+                p.vid is not None
+                or dev.startswith("/dev/ttyUSB")
+                or dev.startswith("/dev/ttyACM")
+                or "usb" in dev.lower()
+                or "usb" in desc
+                or "acm" in dev.lower()
+            )
+            is_esp_chip = any(k in desc or k in hwid for k in (
+                "cp210", "ch340", "ch341", "ch910", "ftdi", "espressif", "esp32", "uart", "jtag"
+            ))
+
+            if is_usb and (is_esp_chip or p.vid in (0x1A86, 0x10C4, 0x0403, 0x303A, 0x2341)):
+                found.add(dev)
+            elif is_usb and (dev.startswith("/dev/ttyUSB") or dev.startswith("/dev/ttyACM") or "usb-serial" in desc or "usb serial" in desc):
                 found.add(dev)
         return found
 

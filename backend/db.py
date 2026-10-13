@@ -1,6 +1,7 @@
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Generator, Optional
 
 from schemas import Incident
 
@@ -12,32 +13,38 @@ COLUMNS = [
 ]
 
 
-def _conn() -> sqlite3.Connection:
+@contextmanager
+def _conn() -> Generator[sqlite3.Connection, None, None]:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
     with _conn() as c:
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS incidents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp REAL, attack_type TEXT, severity TEXT, layer TEXT,
-                src_mac TEXT, bssid TEXT, ssid TEXT, victim_count INTEGER,
-                channel INTEGER, rssi INTEGER, frame_rate REAL,
-                impact TEXT, action TEXT, source TEXT)"""
-        )
+        with c:
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS incidents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL, attack_type TEXT, severity TEXT, layer TEXT,
+                    src_mac TEXT, bssid TEXT, ssid TEXT, victim_count INTEGER,
+                    channel INTEGER, rssi INTEGER, frame_rate REAL,
+                    impact TEXT, action TEXT, source TEXT)"""
+            )
 
 
 def insert_incident(inc: Incident) -> Incident:
     data = inc.model_dump(mode="json")
     with _conn() as c:
-        cur = c.execute(
-            f"INSERT INTO incidents ({','.join(COLUMNS)}) VALUES ({','.join('?' * len(COLUMNS))})",
-            [data[k] for k in COLUMNS],
-        )
-        inc.id = cur.lastrowid
+        with c:
+            cur = c.execute(
+                f"INSERT INTO incidents ({','.join(COLUMNS)}) VALUES ({','.join('?' * len(COLUMNS))})",
+                [data[k] for k in COLUMNS],
+            )
+            inc.id = cur.lastrowid
     return inc
 
 

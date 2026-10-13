@@ -33,14 +33,13 @@
         <span class="w-2 h-2 rounded-full" :class="mode === 'live' ? 'bg-emerald-400 animate-pulse' : 'bg-slate-400'"></span>
         💻 Laptop Monitor
       </span>
-      <template v-for="s in sensors" :key="s.name">
-        <span class="px-2.5 py-1 rounded flex items-center gap-1.5 text-xs font-mono transition-all duration-300"
-              :class="s.online ? 'bg-indigo-900/80 border border-indigo-400 text-indigo-100 shadow-sm shadow-indigo-500/20' : 'bg-slate-800/80 border border-slate-700 text-slate-400'">
-          <span class="w-2 h-2 rounded-full" :class="s.online ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'"></span>
+      <template v-for="s in onlineSensors" :key="s.port || s.name">
+        <span class="px-2.5 py-1 rounded flex items-center gap-1.5 text-xs font-mono transition-all duration-300 bg-indigo-900/80 border border-indigo-400 text-indigo-100 shadow-sm shadow-indigo-500/20">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
           🔌 {{ s.name }} ({{ s.total }} events)
         </span>
       </template>
-      <span v-if="!sensors.length" class="text-xs text-amber-400/90 italic flex items-center gap-1">
+      <span v-if="!onlineSensors.length" class="text-xs text-amber-400/90 italic flex items-center gap-1">
         🔌 กำลังรอตรวจจับ ESP32 (เสียบสาย USB ใช้งานได้ทันทีแบบ Plug & Play)
       </span>
     </div>
@@ -148,7 +147,8 @@ createApp({
     const frames = { Beacon: 0, Probe: 0, Auth: 0, Deauth: 0 };
     let chart, ws, audioCtx;
 
-    const totalSensorEvents = computed(() => sensors.value.reduce((acc, s) => acc + (s.total || 0), 0));
+    const onlineSensors = computed(() => (sensors.value || []).filter(s => s && s.online));
+    const totalSensorEvents = computed(() => onlineSensors.value.reduce((acc, s) => acc + (s.total || 0), 0));
 
     const threatStatus = computed(() => (counts.value.Critical || 0) && recentCritical.value ? 'Critical'
       : (counts.value.Suspicious || 0) || (counts.value.Critical || 0) ? 'Suspicious' : 'Normal');
@@ -224,7 +224,7 @@ createApp({
     });
 
     return { incidents, counts, total, mode, connected, muted, query, selected,
-             sensors, totalSensorEvents, formatSource, sourceBadge,
+             sensors, onlineSensors, totalSensorEvents, formatSource, sourceBadge,
              threatStatus, statusClass, badge, fmt, loadIncidents, simulate };
   },
 }).mount('#app');

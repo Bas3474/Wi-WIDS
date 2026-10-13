@@ -133,36 +133,68 @@ class DeauthDetector(Detector):
 
 
 class EvilTwinDetector(Detector):
-    """2. Beacon ของ SSID ที่เฝ้าระวัง แต่ BSSID/Channel ไม่อยู่ใน profile"""
+    """2. ตรวจจับ Evil Twin / Rogue AP (ตรงตามฟังก์ชัน Evil Twin ของ airgeddon)
+    รองรับทั้ง:
+      - ตรวจจับตาม Profile (config.json)
+      - ตรวจจับแบบ Dynamic อัตโนมัติ (พบ SSID เดียวกันปล่อยจาก 2 BSSID ต่างกัน โดยเฉพาะเมื่อมี Deauth ร่วมด้วย)
+    """
 
     def __init__(self, profiles: list[dict], cooldown=None):
         super().__init__(cooldown)
         self.profiles = {p["ssid"]: p for p in profiles}
+        self.seen_ssids: dict[str, set[str]] = defaultdict(set)
+        self.last_deauth: dict[str, float] = {}
 
     def feed(self, ev):
+        if ev.kind == "deauth":
+            bssid = norm_mac(ev.bssid)
+            if bssid:
+                self.last_deauth[bssid] = ev.ts
+            return []
         if ev.kind != "beacon":
             return []
-        prof = self.profiles.get(ev.ssid)
-        if not prof:
+        ssid = (ev.ssid or "").strip()
+        if not ssid:
             return []
         bssid = norm_mac(ev.bssid or ev.src)
-        allowed = {norm_mac(b) for b in prof.get("bssids", [])}
-        chans = prof.get("channels", [])
-        bad_bssid = bool(allowed) and bssid not in allowed
-        bad_chan = bool(chans) and ev.channel and ev.channel not in chans
-        if not (bad_bssid or bad_chan) or not self._ready(bssid, ev.ts):
+        if not bssid:
             return []
-        why = "BSSID ไม่อยู่ใน profile" if bad_bssid else f"อยู่ช่อง {ev.channel} ผิดจาก profile"
-        return [Detection(
-            EVIL_TWIN, CRITICAL, L2, bssid, bssid, ev.ssid, 0, ev.channel, ev.rssi, 0.0,
-            f"พบ AP ปลอมใช้ SSID '{ev.ssid}' ({why}) Client อาจถูกหลอกให้เชื่อมต่อ",
-            "แจ้งผู้ใช้ไม่ให้เชื่อมต่อ, หาตำแหน่ง AP ปลอมจาก RSSI")]
+
+        # 1. ตรวจสอบตาม Profile ที่กำหนดใน config.json
+        prof = self.profiles.get(ssid)
+        if prof:
+            allowed = {norm_mac(b) for b in prof.get("bssids", [])}
+            chans = prof.get("channels", [])
+            bad_bssid = bool(allowed) and bssid not in allowed
+            bad_chan = bool(chans) and ev.channel and ev.channel not in chans
+            if (bad_bssid or bad_chan) and self._ready(f"{ssid}_{bssid}", ev.ts):
+                why = "BSSID ไม่อยู่ใน profile" if bad_bssid else f"อยู่ช่อง {ev.channel} ผิดจาก profile"
+                return [Detection(
+                    EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 0, ev.channel, ev.rssi, 0.0,
+                    f"พบ Evil Twin (airgeddon Rogue AP) ใช้ SSID '{ssid}' ({why})",
+                    "แจ้งเตือนผู้ใช้ห้ามเชื่อมต่อเด็ดขาด, ตรวจสอบตำแหน่ง AP ปลอม")]
+
+        # 2. ตรวจสอบแบบ Dynamic: หาก SSID เดียวกันถูกปล่อยจาก BSSID ใหม่ที่ไม่เคยพบ
+        known = self.seen_ssids[ssid]
+        if known and bssid not in known:
+            # มี Deauth เกิดขึ้นกับ AP เดิมหรือไม่ (พฤติกรรมเฉพาะของ airgeddon Captive Portal)
+            has_recent_deauth = any(ev.ts - self.last_deauth.get(old_b, float("-inf")) < 60 for old_b in known)
+            if self._ready(f"dyn_{ssid}_{bssid}", ev.ts):
+                msg = f"ตรวจพบ AP ที่ 2 ใช้ชื่อ SSID '{ssid}' ซ้ำกับ AP เดิม (BSSID: {bssid})"
+                if has_recent_deauth:
+                    msg += " ร่วมกับการยิง Deauth ตัดสัญญาณ AP จริง (รูปแบบการโจมตี Evil Twin + Captive Portal ของ airgeddon)"
+                return [Detection(
+                    EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 1, ev.channel, ev.rssi, 0.0,
+                    msg,
+                    "ตัดการเชื่อมต่อทันที, สแกนหาตำแหน่ง BSSID แปลกปลอม")]
+        known.add(bssid)
+        return []
 
 
 class ReconDetector(Detector):
-    """5. Probe Request ถี่จาก MAC เดียว"""
+    """5. ตรวจจับ Probe Request Flood / Reconnaissance ใน airgeddon"""
 
-    def __init__(self, window=10.0, threshold=40, cooldown=None):
+    def __init__(self, window=10.0, threshold=25, cooldown=None):
         super().__init__(cooldown)
         self.window, self.threshold = window, threshold
         self.win: dict = defaultdict(deque)
@@ -186,11 +218,14 @@ class ReconDetector(Detector):
 
 
 class WpaCrackDetector(Detector):
-    """4. EAPOL ซ้ำต่อ BSSID — เชื่อมกับ Deauth ล่าสุด (correlation) เพื่อลด false positive"""
+    """4. ตรวจจับการดักจับ Handshake (WPA Handshake Capture ใน airgeddon):
+    เมื่อ airgeddon ยิง Deauth เพื่อบังคับให้ Client ส่ง EAPOL 4-Way Handshake
+    """
 
-    def __init__(self, window=30.0, threshold=8, threshold_no_deauth=24, cooldown=None):
+    def __init__(self, window=30.0, threshold=2, threshold_no_deauth=12, cooldown=None):
         super().__init__(cooldown)
-        self.window, self.threshold = window, threshold
+        self.window = window
+        self.threshold = threshold  # 2 เฟรมหลัง Deauth ชี้ชัดว่ามีการจับ Handshake
         self.threshold_no_deauth = threshold_no_deauth
         self.eapol: dict = defaultdict(deque)
         self.last_deauth: dict = {}
@@ -198,7 +233,8 @@ class WpaCrackDetector(Detector):
     def feed(self, ev):
         bssid = norm_mac(ev.bssid)
         if ev.kind == "deauth":
-            self.last_deauth[bssid] = ev.ts
+            if bssid:
+                self.last_deauth[bssid] = ev.ts
             return []
         if ev.kind != "eapol":
             return []
@@ -212,10 +248,10 @@ class WpaCrackDetector(Detector):
             return []
         clients = {m for _, m in q}
         return [Detection(
-            WPA_CRACK, SUSPICIOUS, L2, bssid, bssid, ev.ssid, len(clients), ev.channel,
+            WPA_CRACK, CRITICAL if correlated else SUSPICIOUS, L2, bssid, bssid, ev.ssid, len(clients), ev.channel,
             ev.rssi, round(len(q) / self.window, 1),
-            "EAPOL handshake ซ้ำในเวลาสั้น" + (" หลังเกิด Deauth (รูปแบบการดักจับ handshake)" if correlated else ""),
-            "เปลี่ยนรหัสผ่าน Wi-Fi ให้ซับซ้อน, เปิด WPA3 ถ้าทำได้")]
+            "ตรวจพบการดักจับ EAPOL 4-Way Handshake" + (" ทันทีหลังถูกยิง Deauth (การโจมตี Handshake Capture ของ airgeddon)" if correlated else " ผิดปกติ"),
+            "ระวังการนำ Handshake ไปถอดรหัส WPA, แนะนำเปิดใช้ WPA3 หรือตั้งรหัสผ่านยาวเกิน 16 ตัวอักษร")]
 
 
 class ArpDetector(Detector):

@@ -6,18 +6,19 @@ setlocal EnableDelayedExpansion
 :: Wi-Fi Micro-WIDS: Windows Setup Script (Plug & Play - No Monitor Mode Required)
 :: ==============================================================================
 
-:: 1. ตรวจสอบสิทธิ์ Administrator (จำเป็นสำหรับการเปิด Firewall พอร์ต 8000)
-net session >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [INFO] กำลังขอสิทธิ์ Administrator เพื่อตั้งค่าระบบและ Firewall...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process cmd -ArgumentList '/c \"\"%~f0\"\"' -Verb RunAs"
-    exit /b
-)
-
 cd /d "%~dp0"
 title Wi-Fi Micro-WIDS Installer
 
 set "PORT=8000"
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+
+:: 1. ตรวจสอบสิทธิ์ Administrator (ถ้ามีจะเปิด Firewall ให้ ถ้าไม่มีก็ติดตั้งได้ปกติ)
+set "IS_ADMIN=0"
+net session >nul 2>&1
+if %errorlevel% equ 0 (
+    set "IS_ADMIN=1"
+)
 
 echo ============================================================
 echo   Wi-Fi Micro-WIDS: Windows Setup (Plug ^& Play Architecture)
@@ -110,12 +111,18 @@ if not exist "firmware\src\netwatch\config.h" (
     echo [OK] สร้าง firmware\src\netwatch\config.h
 )
 
-:: 6. เปิด Windows Firewall พอร์ต 8000
+:: 6. เปิด Windows Firewall พอร์ต 8000 (ถ้ามีสิทธิ์ Admin)
 echo.
-echo [4/4] ตั้งค่า Windows Firewall อนุญาตพอร์ต %PORT%/TCP...
-netsh advfirewall firewall delete rule name="Wi-Fi Micro-WIDS Port %PORT%" >nul 2>&1
-netsh advfirewall firewall add rule name="Wi-Fi Micro-WIDS Port %PORT%" dir=in action=allow protocol=TCP localport=%PORT% profile=any >nul
-echo [OK] เปิดพอร์ต %PORT%/TCP บน Windows Firewall เรียบร้อย
+echo [4/4] ตรวจสอบการตั้งค่า Windows Firewall สำหรับพอร์ต %PORT%/TCP...
+if "!IS_ADMIN!"=="1" (
+    netsh advfirewall firewall delete rule name="Wi-Fi Micro-WIDS Port %PORT%" >nul 2>&1
+    netsh advfirewall firewall add rule name="Wi-Fi Micro-WIDS Port %PORT%" dir=in action=allow protocol=TCP localport=%PORT% profile=any >nul
+    echo [OK] เปิดพอร์ต %PORT%/TCP บน Windows Firewall เรียบร้อย
+) else (
+    echo [INFO] ข้ามการเพิ่ม Firewall Rule (ไม่ได้รันด้วย Administrator)
+    echo        - โหมด USB Serial และ localhost: ใช้งานได้ทันที 100%%
+    echo        - หากต้องการให้อุปกรณ์อื่นในวง LAN เชื่อมต่อได้ ให้คลิกขวา setup.bat แล้วเลือก "Run as administrator"
+)
 
 echo.
 echo ============================================================
