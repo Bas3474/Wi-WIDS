@@ -231,6 +231,86 @@ async def simulate(attack: Optional[AttackType] = None, x_token: Optional[str] =
     return inc
 
 
+class TrustDormBody(BaseModel):
+    ssid: str
+    bssid: str = ""
+    is_dorm: bool = True
+
+
+@app.get("/api/dorm-networks")
+def get_dorm_networks():
+    """ดึงรายชื่อโปรไฟล์ Wi-Fi และเครือข่ายหอพัก/มหาลัยที่อนุญาต"""
+    cfg = load_config()
+    return cfg.get("profiles", [])
+
+
+@app.post("/api/dorm-networks/trust")
+def trust_dorm_network(body: TrustDormBody, x_token: Optional[str] = Header(None)):
+    """กำหนดว่า SSID/BSSID นี้เป็น Wi-Fi หอพักหรือมหาวิทยาลัย (เพิ่มเข้า Whitelist แบบเรียลไทม์)"""
+    check_token(x_token)
+    cfg = load_config()
+    profiles = cfg.get("profiles", [])
+    ssid = body.ssid.strip()
+    bssid = (body.bssid or "").strip().upper()
+    if not ssid:
+        raise HTTPException(status_code=400, detail="ssid is required")
+
+    target = None
+    for p in profiles:
+        if p.get("ssid") == ssid:
+            target = p
+            break
+
+    if target is None:
+        target = {
+            "ssid": ssid,
+            "bssids": [bssid] if bssid else [],
+            "channels": [],
+            "is_dorm_campus": body.is_dorm,
+        }
+        profiles.append(target)
+    else:
+        target["is_dorm_campus"] = body.is_dorm
+        if bssid and bssid not in target.get("bssids", []):
+            target.setdefault("bssids", []).append(bssid)
+
+    cfg["profiles"] = profiles
+    path = ROOT / "configs" / "config.json"
+    path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    if engine:
+        engine.reload_profiles(profiles)
+
+    return {"status": "ok", "profiles": profiles}
+
+
+@app.post("/api/dorm-networks/untrust")
+def untrust_dorm_network(body: TrustDormBody, x_token: Optional[str] = Header(None)):
+    """ยกเลิกการอนุญาต BSSID หรือปลดโหมด Wi-Fi หอพัก/มหาลัย"""
+    check_token(x_token)
+    cfg = load_config()
+    profiles = cfg.get("profiles", [])
+    ssid = body.ssid.strip()
+    bssid = (body.bssid or "").strip().upper()
+
+    for p in profiles:
+        if p.get("ssid") == ssid:
+            if bssid and bssid in p.get("bssids", []):
+                p["bssids"].remove(bssid)
+            if not body.is_dorm:
+                p["is_dorm_campus"] = False
+            break
+
+    cfg["profiles"] = profiles
+    path = ROOT / "configs" / "config.json"
+    path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    if engine:
+        engine.reload_profiles(profiles)
+
+    return {"status": "ok", "profiles": profiles}
+
+
 class IngestEvent(BaseModel):
     kind: str
     ts: Optional[float] = None

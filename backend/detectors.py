@@ -144,6 +144,10 @@ class EvilTwinDetector(Detector):
         self.seen_ssids: dict[str, set[str]] = defaultdict(set)
         self.last_deauth: dict[str, float] = {}
 
+    def reload_profiles(self, profiles: list[dict]) -> None:
+        """อัปเดตโปรไฟล์เครือข่ายที่อนุญาตแบบเรียลไทม์ (เมื่อผู้ใช้กดระบุ Wi-Fi หอพัก/มหาลัย)"""
+        self.profiles = {p["ssid"]: p for p in profiles}
+
     def feed(self, ev):
         if ev.kind == "deauth":
             bssid = norm_mac(ev.bssid)
@@ -166,6 +170,7 @@ class EvilTwinDetector(Detector):
         if prof:
             allowed = {norm_mac(b) for b in prof.get("bssids", [])}
             chans = prof.get("channels", [])
+            is_dorm = bool(prof.get("is_dorm_campus", False))
 
             # เช็คว่ามี Deauth เกิดขึ้นกับ AP ใดๆ ในเครือข่ายนี้หรือไม่
             has_recent_deauth = any(
@@ -175,16 +180,26 @@ class EvilTwinDetector(Detector):
 
             bad_bssid = bool(allowed) and (bssid not in allowed)
             bad_chan = bool(chans) and ev.channel and (ev.channel not in chans)
+            if is_dorm:
+                # ในเครือข่ายหอพัก/มหาวิทยาลัย อนุญาตให้กระจายช่องสัญญาณได้ (Multi-AP Roaming)
+                bad_chan = False
 
-            if (bad_bssid or bad_chan) and self._ready(f"{ssid}_{bssid}", ev.ts):
-                why = "BSSID แปลกปลอม ไม่อยู่ใน profile" if bad_bssid else f"อยู่ช่อง {ev.channel} ผิดจาก profile"
-                msg = f"พบ Evil Twin (airgeddon Rogue AP) ใช้ SSID '{ssid}' ({why})"
-                if has_recent_deauth:
-                    msg += " ร่วมกับการยิง Deauth ตัดสัญญาณ AP จริง (airgeddon Attack Pattern)"
-                return [Detection(
-                    EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 0, ev.channel, ev.rssi, 0.0,
-                    msg,
-                    "แจ้งเตือนผู้ใช้ห้ามเชื่อมต่อเด็ดขาด, ตรวจสอบตำแหน่ง AP ปลอม")]
+            if bad_bssid or bad_chan:
+                if self._ready(f"{ssid}_{bssid}", ev.ts):
+                    why = "BSSID แปลกปลอม ไม่อยู่ใน profile" if bad_bssid else f"อยู่ช่อง {ev.channel} ผิดจาก profile"
+                    tag = " (เครือข่ายหอ/มหาลัย)" if is_dorm else ""
+                    msg = f"พบ Evil Twin (airgeddon Rogue AP) ใช้ SSID '{ssid}' ({why}){tag}"
+                    if has_recent_deauth:
+                        msg += " ร่วมกับการยิง Deauth ตัดสัญญาณ AP จริง (airgeddon Attack Pattern)"
+                    return [Detection(
+                        EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 0, ev.channel, ev.rssi, 0.0,
+                        msg,
+                        "แจ้งเตือนผู้ใช้ห้ามเชื่อมต่อเด็ดขาด, ตรวจสอบตำแหน่ง AP ปลอม")]
+                return []
+
+            if allowed or is_dorm:
+                self.seen_ssids[ssid].add(bssid)
+                return []
 
         # 2. ตรวจสอบแบบ Dynamic: หาก SSID เดียวกันถูกปล่อยจาก BSSID ใหม่ที่ไม่เคยพบ
         known = self.seen_ssids[ssid]

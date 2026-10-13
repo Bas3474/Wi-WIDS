@@ -98,18 +98,35 @@ class TestEvilTwin(unittest.TestCase):
         self.assertEqual(out[0].attack_type, "Evil Twin")
         self.assertEqual(out[0].severity, "Critical")
 
-    def test_simulate_attacks_evil_twin_scenario(self):
-        # ตรวจสอบว่าเหตุการณ์จำลองจาก simulate_attacks.py ส่งผลให้เกิด Evil Twin alert
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-        import simulate_attacks as sim
-        d = EvilTwinDetector([{"ssid": sim.SSID, "bssids": [sim.AP], "channels": [6]}])
-        evs = [Event(e["kind"], 10.0 + i, e.get("src", ""), bssid=e.get("bssid", ""), ssid=e.get("ssid", ""), channel=e.get("channel", 1))
-               for i, e in enumerate(sim.evil_twin())]
-        out = []
-        for ev in evs:
-            out += d.feed(ev)
-        self.assertGreaterEqual(len(out), 1)
+    def test_dorm_campus_multi_ap_and_channels_allowed(self):
+        # เครือข่ายหอพัก/มหาวิทยาลัย: มีหลาย AP ต่าง BSSID และต่าง Channel ที่ถูกระบุอนุญาตไว้
+        prof = [{"ssid": "CampusWiFi", "bssids": ["AA:BB:CC:11:22:33", "11:22:33:44:55:66"], "channels": [1], "is_dorm_campus": True}]
+        d = EvilTwinDetector(prof)
+        out1 = d.feed(Event("beacon", 1, "AA:BB:CC:11:22:33", bssid="AA:BB:CC:11:22:33", ssid="CampusWiFi", channel=1))
+        out2 = d.feed(Event("beacon", 2, "11:22:33:44:55:66", bssid="11:22:33:44:55:66", ssid="CampusWiFi", channel=11))
+        self.assertEqual(out1, [])
+        self.assertEqual(out2, [])
+
+    def test_dorm_campus_unwhitelisted_bssid_flagged(self):
+        # เครือข่ายหอพัก/มหาวิทยาลัย: หากมี BSSID แปลกปลอมที่ไม่ได้รับอนุญาต ต้องตรวจจับเป็น Evil Twin
+        prof = [{"ssid": "CampusWiFi", "bssids": ["AA:BB:CC:11:22:33"], "channels": [1], "is_dorm_campus": True}]
+        d = EvilTwinDetector(prof)
+        out = d.feed(Event("beacon", 1, "66:66:66:66:66:66", bssid="66:66:66:66:66:66", ssid="CampusWiFi", channel=6))
+        self.assertEqual(len(out), 1)
         self.assertEqual(out[0].attack_type, "Evil Twin")
+        self.assertIn("เครือข่ายหอ/มหาลัย", out[0].impact)
+
+    def test_dorm_campus_reload_profiles(self):
+        # ทดสอบ hot-reload profile เมื่อผู้ใช้กดอนุญาต BSSID เพิ่มเติม
+        prof = [{"ssid": "CampusWiFi", "bssids": ["AA:BB:CC:11:22:33"], "channels": [1], "is_dorm_campus": True}]
+        d = EvilTwinDetector(prof)
+        out_before = d.feed(Event("beacon", 1, "22:33:44:55:66:77", bssid="22:33:44:55:66:77", ssid="CampusWiFi", channel=6))
+        self.assertEqual(len(out_before), 1)
+        # ผู้ใช้กดปุ่มระบุว่าเป็น Wi-Fi หอพัก -> reload profiles
+        prof[0]["bssids"].append("22:33:44:55:66:77")
+        d.reload_profiles(prof)
+        out_after = d.feed(Event("beacon", 100, "22:33:44:55:66:77", bssid="22:33:44:55:66:77", ssid="CampusWiFi", channel=6))
+        self.assertEqual(out_after, [])
 
 
 class TestRecon(unittest.TestCase):

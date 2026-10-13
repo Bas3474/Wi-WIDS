@@ -76,6 +76,9 @@
                class="flex-1 min-w-[10rem] bg-slate-900 rounded px-3 py-1.5 text-sm">
         <a :href="'/api/export.csv' + (query ? '?q=' + encodeURIComponent(query) : '')"
            class="bg-blue-600 hover:bg-blue-500 rounded px-3 py-1.5 text-sm">⬇ CSV</a>
+        <button @click="openDormModal" class="bg-indigo-700/80 hover:bg-indigo-600 border border-indigo-500/50 rounded px-3 py-1.5 text-sm text-indigo-100 flex items-center gap-1.5 font-medium transition">
+          🏫 Wi-Fi หอ/มหาลัย
+        </button>
         <button @click="simulate" class="bg-slate-600 hover:bg-slate-500 rounded px-3 py-1.5 text-sm">+ จำลองเหตุการณ์</button>
         <button @click="clearHistory" class="bg-rose-900/60 hover:bg-rose-800/80 border border-rose-600/50 rounded px-3 py-1.5 text-sm text-rose-200">🗑️ ล้างประวัติ</button>
       </div>
@@ -159,6 +162,87 @@
         <dt class="text-slate-400">Impact</dt><dd class="col-span-2 text-rose-300 font-medium">{{ selected.impact }}</dd>
         <dt class="text-slate-400">Action</dt><dd class="col-span-2 text-emerald-300 font-medium">{{ selected.action }}</dd>
       </dl>
+
+      <!-- Dorm / Campus Wi-Fi Whitelist Action -->
+      <div v-if="selected.ssid || selected.bssid" class="p-3 bg-slate-900/90 border border-indigo-700/60 rounded-lg space-y-2">
+        <div class="flex items-center justify-between">
+          <div class="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+            <span>🏫 สถานะเครือข่าย:</span>
+            <span v-if="isDormNetwork(selected.ssid)" class="text-emerald-400 font-bold">
+              Wi-Fi หอพัก / มหาวิทยาลัย (Multi-AP)
+            </span>
+            <span v-else class="text-slate-400">
+              Wi-Fi ทั่วไป (Single-AP)
+            </span>
+          </div>
+          <span v-if="isBssidWhitelisted(selected.ssid, selected.bssid)" class="px-2 py-0.5 rounded text-[11px] bg-emerald-900/70 text-emerald-300 border border-emerald-500/60">
+            ✅ BSSID ได้รับอนุญาตแล้ว
+          </span>
+        </div>
+
+        <div class="flex flex-wrap gap-2 pt-0.5">
+          <button v-if="!isBssidWhitelisted(selected.ssid, selected.bssid)"
+                  @click="trustDorm(selected.ssid, selected.bssid, true)"
+                  class="bg-indigo-600 hover:bg-indigo-500 text-white rounded px-3 py-1.5 text-xs font-semibold flex items-center gap-1.5 shadow-sm transition">
+            🏫 กดระบุว่าเป็น Wi-Fi หอ/มหาลัย (อนุญาต BSSID นี้)
+          </button>
+          <button v-else
+                  @click="untrustDorm(selected.ssid, selected.bssid)"
+                  class="bg-rose-900/60 hover:bg-rose-800/80 text-rose-200 border border-rose-600/50 rounded px-3 py-1.5 text-xs flex items-center gap-1.5 transition">
+            ✕ ยกเลิกการอนุญาต BSSID นี้
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dorm / University Networks Management Modal -->
+  <div v-if="showDormModal" class="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" @click.self="showDormModal = false">
+    <div class="bg-slate-800 rounded-lg p-5 w-full max-w-lg space-y-4 max-h-[85vh] overflow-y-auto shadow-2xl border border-slate-700">
+      <div class="flex justify-between items-center border-b border-slate-700 pb-2">
+        <div>
+          <h3 class="text-lg font-bold flex items-center gap-2">🏫 จัดการ Wi-Fi หอพักและมหาวิทยาลัย</h3>
+          <p class="text-xs text-slate-400">กำหนด Router ที่ได้รับอนุญาต (Multi-AP Whitelist) เพื่อไม่ให้เตือนเป็น Evil Twin</p>
+        </div>
+        <button @click="showDormModal = false" class="text-slate-400 text-xl hover:text-white">✕</button>
+      </div>
+
+      <div class="space-y-3">
+        <div v-for="p in dormNetworks" :key="p.ssid" class="bg-slate-900 border border-slate-700 rounded-lg p-3 space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-sky-300 text-sm flex items-center gap-1">
+              📶 {{ p.ssid }}
+            </span>
+            <label class="flex items-center gap-1.5 text-xs cursor-pointer">
+              <input type="checkbox" :checked="p.is_dorm_campus" @change="toggleDormMode(p.ssid, $event.target.checked)" class="rounded">
+              <span :class="p.is_dorm_campus ? 'text-emerald-400 font-semibold' : 'text-slate-400'">โหมดหอ/มหาลัย (Multi-AP)</span>
+            </label>
+          </div>
+
+          <div class="text-xs text-slate-400">
+            <div class="font-semibold mb-1 text-slate-300">BSSID ที่อนุญาต (Router จริง):</div>
+            <div v-if="p.bssids && p.bssids.length" class="flex flex-wrap gap-1.5">
+              <span v-for="b in p.bssids" :key="b" class="px-2 py-0.5 rounded bg-slate-800 border border-slate-600 text-[11px] font-mono text-slate-200 flex items-center gap-1">
+                {{ b }}
+                <button @click="untrustDorm(p.ssid, b)" class="text-rose-400 hover:text-rose-200 text-xs ml-0.5 font-bold" title="ลบ BSSID">✕</button>
+              </span>
+            </div>
+            <div v-else class="text-slate-500 italic text-[11px]">ยังไม่มี BSSID ที่อนุญาต</div>
+          </div>
+        </div>
+
+        <!-- Add BSSID manually form -->
+        <div class="bg-slate-900/60 border border-dashed border-slate-700 rounded-lg p-3 space-y-2 text-xs">
+          <div class="font-semibold text-slate-300">+ เพิ่ม Router / BSSID เข้า Whitelist ด้วยตัวเอง</div>
+          <div class="grid grid-cols-2 gap-2">
+            <input v-model="newDormSsid" placeholder="ชื่อ SSID (เช่น Yes_Yes_Yes)" class="bg-slate-800 rounded px-2.5 py-1.5 text-xs text-slate-100">
+            <input v-model="newDormBssid" placeholder="MAC BSSID (เช่น BE:27:7A:...)" class="bg-slate-800 rounded px-2.5 py-1.5 text-xs font-mono text-slate-100">
+          </div>
+          <button @click="addManualDorm" class="bg-indigo-600 hover:bg-indigo-500 text-white rounded px-3 py-1.5 font-semibold transition w-full shadow-sm">
+            บันทึก BSSID นี้เข้าเครือข่ายหอ/มหาลัย
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -319,6 +403,69 @@ createApp({
       };
     }
 
+    const dormNetworks = ref([]), showDormModal = ref(false);
+    const newDormSsid = ref(''), newDormBssid = ref('');
+
+    async function loadDormNetworks() {
+      try {
+        const res = await fetch('/api/dorm-networks');
+        if (res.ok) dormNetworks.value = await res.json();
+      } catch (e) {}
+    }
+
+    function isDormNetwork(ssid) {
+      if (!ssid) return false;
+      const p = dormNetworks.value.find(x => x.ssid === ssid);
+      return !!(p && p.is_dorm_campus);
+    }
+
+    function isBssidWhitelisted(ssid, bssid) {
+      if (!ssid || !bssid) return false;
+      const p = dormNetworks.value.find(x => x.ssid === ssid);
+      if (!p || !p.bssids) return false;
+      return p.bssids.map(b => (b || '').toUpperCase()).includes(bssid.toUpperCase());
+    }
+
+    async function trustDorm(ssid, bssid, isDorm = true) {
+      if (!ssid) return;
+      const res = await authFetch('/api/dorm-networks/trust', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ssid, bssid: bssid || '', is_dorm: isDorm }),
+      });
+      if (res.ok) {
+        await loadDormNetworks();
+      }
+    }
+
+    async function untrustDorm(ssid, bssid) {
+      if (!ssid) return;
+      const res = await authFetch('/api/dorm-networks/untrust', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ssid, bssid: bssid || '', is_dorm: true }),
+      });
+      if (res.ok) {
+        await loadDormNetworks();
+      }
+    }
+
+    async function toggleDormMode(ssid, isDorm) {
+      if (!ssid) return;
+      await trustDorm(ssid, '', isDorm);
+    }
+
+    function openDormModal() {
+      loadDormNetworks();
+      showDormModal.value = true;
+    }
+
+    async function addManualDorm() {
+      if (!newDormSsid.value.trim()) return alert('กรุณาระบุชื่อ SSID');
+      await trustDorm(newDormSsid.value.trim(), newDormBssid.value.trim(), true);
+      newDormBssid.value = '';
+    }
+
     onMounted(() => {
       chart = new Chart(document.getElementById('chart'), {
         type: 'doughnut',
@@ -327,12 +474,16 @@ createApp({
         options: { plugins: { legend: { labels: { color: '#e2e8f0' } } } },
       });
       connect();
+      loadDormNetworks();
     });
 
     return { incidents, counts, total, mode, connected, muted, query, selected,
              sensors, onlineSensors, totalSensorEvents, formatSource, sourceBadge,
              threatStatus, statusClass, badge, fmt, loadIncidents, simulate,
-             warmupSec, clearHistory, formatSignal, signalColor, latestActiveIncident };
+             warmupSec, clearHistory, formatSignal, signalColor, latestActiveIncident,
+             dormNetworks, showDormModal, newDormSsid, newDormBssid, openDormModal,
+             trustDorm, untrustDorm, toggleDormMode, addManualDorm, isDormNetwork,
+             isBssidWhitelisted };
   },
 }).mount('#app');
 </script>

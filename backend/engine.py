@@ -64,3 +64,16 @@ class Engine:
             out = {k: self.frames.get(k, 0) for k in ("Beacon", "Probe", "Auth", "Deauth")}
             self.frames.clear()
         return out
+
+    def reload_profiles(self, profiles: list[dict]) -> None:
+        """อัปเดตโปรไฟล์เครือข่ายที่อนุญาตแบบเรียลไทม์ (เมื่อผู้ใช้กดระบุ Wi-Fi หอพัก/มหาลัย)"""
+        with self.lock:
+            self.bssid_to_ssid.clear()
+            for p in profiles:
+                s = p.get("ssid", "")
+                for b in p.get("bssids", []):
+                    self.bssid_to_ssid[D.norm_mac(b)] = s
+            for det in self.detectors:
+                if hasattr(det, "reload_profiles"):
+                    det.reload_profiles(profiles)
+
