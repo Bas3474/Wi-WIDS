@@ -15,7 +15,8 @@
       "bssids": [
         "BE:27:7A:AC:81:06"
       ],
-      "channels": []
+      "channels": [],
+      "multi_ap": true
     }
   ],
   "network": {

@@ -59,6 +59,13 @@ def norm_mac(m: str) -> str:
     return (m or "").upper()
 
 
+def same_oui(m1: str, m2: str) -> bool:
+    """ตรวจสอบว่า MAC ทั้งสองมาจากผู้ผลิต (Vendor OUI) เดียวกันหรือไม่ (3 คู่แรก เช่น BE:27:7A)"""
+    p1 = norm_mac(m1).split(":")
+    p2 = norm_mac(m2).split(":")
+    return len(p1) >= 3 and len(p2) >= 3 and p1[:3] == p2[:3]
+
+
 class Detector:
     cooldown = 30.0
 
@@ -135,8 +142,10 @@ class DeauthDetector(Detector):
 class EvilTwinDetector(Detector):
     """2. ตรวจจับ Evil Twin / Rogue AP (ตรงตามฟังก์ชัน Evil Twin ของ airgeddon)
     รองรับทั้ง:
-      - ตรวจจับตาม Profile (config.json)
-      - ตรวจจับแบบ Dynamic อัตโนมัติ (พบ SSID เดียวกันปล่อยจาก 2 BSSID ต่างกัน โดยเฉพาะเมื่อมี Deauth ร่วมด้วย)
+      - หอพัก / มหาวิทยาลัย (Multi-AP / Enterprise Mesh Roaming):
+        Router หลายตัวยี่ห้อเดียวกัน (Same OUI) กระจายหลายช่องสัญญาณ ทำงานร่วมกันอย่างสงบ
+      - ตรวจจับตาม Profile (config.json) พร้อมตัวเลือก multi_ap
+      - ตรวจจับแบบ Dynamic อัตโนมัติ (ตรวจจับ Deauth correlation ของ airgeddon และ Vendor OUI mismatch)
     """
 
     def __init__(self, profiles: list[dict], cooldown=None):
@@ -150,6 +159,8 @@ class EvilTwinDetector(Detector):
             bssid = norm_mac(ev.bssid)
             if bssid:
                 self.last_deauth[bssid] = ev.ts
+            if ev.ssid:
+                self.last_deauth[f"ssid_{ev.ssid}"] = ev.ts
             return []
         if ev.kind != "beacon":
             return []
@@ -165,28 +176,70 @@ class EvilTwinDetector(Detector):
         if prof:
             allowed = {norm_mac(b) for b in prof.get("bssids", [])}
             chans = prof.get("channels", [])
-            bad_bssid = bool(allowed) and bssid not in allowed
+            is_multi_ap = bool(prof.get("multi_ap", False))
+
+            # เช็คว่ามี Deauth เกิดขึ้นกับ AP ใดๆ ในเครือข่ายนี้หรือไม่
+            has_recent_deauth = any(
+                ev.ts - self.last_deauth.get(b, float("-inf")) < 60
+                for b in (allowed or self.seen_ssids[ssid])
+            ) or (ev.ts - self.last_deauth.get(f"ssid_{ssid}", float("-inf")) < 60)
+
+            same_vendor = any(same_oui(a, bssid) for a in allowed)
+
+            bad_bssid = False
+            if allowed:
+                if bssid in allowed:
+                    bad_bssid = False
+                elif is_multi_ap and same_vendor and not has_recent_deauth:
+                    # โหมดเน็ตหอพัก/มหาลัย: ยี่ห้อเดียวกัน (OUI ตรงกัน) และไม่มีการยิง Deauth -> เป็น Router จุดอื่นที่ปลอดภัย
+                    bad_bssid = False
+                elif is_multi_ap and not has_recent_deauth:
+                    # โหมดเน็ตหอพัก/มหาลัย: มีหลาย Router ทำงานร่วมกันอย่างสงบ ไม่มีการยิง Deauth
+                    bad_bssid = False
+                else:
+                    # นอก Whitelist และไม่ใช่ multi_ap หรือมีการยิง Deauth ตัดสัญญาณ -> ตรวจพบ Evil Twin!
+                    bad_bssid = True
+
             bad_chan = bool(chans) and ev.channel and ev.channel not in chans
+            if is_multi_ap:
+                # ในโหมด multi_ap อนุญาตให้กระจายช่องสัญญาณได้ (เช่น 1, 6, 11) ไม่มองว่าผิดช่อง
+                bad_chan = False
+
             if (bad_bssid or bad_chan) and self._ready(f"{ssid}_{bssid}", ev.ts):
                 why = "BSSID ไม่อยู่ใน profile" if bad_bssid else f"อยู่ช่อง {ev.channel} ผิดจาก profile"
+                msg = f"พบ Evil Twin (airgeddon Rogue AP) ใช้ SSID '{ssid}' ({why})"
+                if has_recent_deauth:
+                    msg += " ร่วมกับการยิง Deauth ตัดสัญญาณ AP จริง (airgeddon Attack Pattern)"
                 return [Detection(
                     EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 0, ev.channel, ev.rssi, 0.0,
-                    f"พบ Evil Twin (airgeddon Rogue AP) ใช้ SSID '{ssid}' ({why})",
+                    msg,
                     "แจ้งเตือนผู้ใช้ห้ามเชื่อมต่อเด็ดขาด, ตรวจสอบตำแหน่ง AP ปลอม")]
 
         # 2. ตรวจสอบแบบ Dynamic: หาก SSID เดียวกันถูกปล่อยจาก BSSID ใหม่ที่ไม่เคยพบ
         known = self.seen_ssids[ssid]
         if known and bssid not in known:
             # มี Deauth เกิดขึ้นกับ AP เดิมหรือไม่ (พฤติกรรมเฉพาะของ airgeddon Captive Portal)
-            has_recent_deauth = any(ev.ts - self.last_deauth.get(old_b, float("-inf")) < 60 for old_b in known)
-            if self._ready(f"dyn_{ssid}_{bssid}", ev.ts):
-                msg = f"ตรวจพบ AP ที่ 2 ใช้ชื่อ SSID '{ssid}' ซ้ำกับ AP เดิม (BSSID: {bssid})"
-                if has_recent_deauth:
-                    msg += " ร่วมกับการยิง Deauth ตัดสัญญาณ AP จริง (รูปแบบการโจมตี Evil Twin + Captive Portal ของ airgeddon)"
-                return [Detection(
-                    EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 1, ev.channel, ev.rssi, 0.0,
-                    msg,
-                    "ตัดการเชื่อมต่อทันที, สแกนหาตำแหน่ง BSSID แปลกปลอม")]
+            has_recent_deauth = any(
+                ev.ts - self.last_deauth.get(old_b, float("-inf")) < 60
+                for old_b in known
+            ) or (ev.ts - self.last_deauth.get(f"ssid_{ssid}", float("-inf")) < 60)
+
+            same_vendor = any(same_oui(old_b, bssid) for old_b in known)
+
+            # เน็ตหอพัก/มหาลัย: ถ้าเป็น Router ยี่ห้อเดียวกัน (Same OUI) และไม่มีการยิง Deauth -> ถือเป็น Multi-AP Roaming ที่ปลอดภัย
+            is_benign_multi_ap = same_vendor and not has_recent_deauth
+
+            if not is_benign_multi_ap:
+                if self._ready(f"dyn_{ssid}_{bssid}", ev.ts):
+                    msg = f"ตรวจพบ AP ที่ 2 ใช้ชื่อ SSID '{ssid}' ซ้ำกับ AP เดิม (BSSID: {bssid})"
+                    if has_recent_deauth:
+                        msg += " ร่วมกับการยิง Deauth ตัดสัญญาณ AP จริง (รูปแบบการโจมตี Evil Twin + Captive Portal ของ airgeddon)"
+                    elif not same_vendor:
+                        msg += " และตรวจพบว่าเป็นคนละยี่ห้อ/การ์ดเครือข่ายแปลกปลอม (Vendor OUI Mismatch)"
+                    return [Detection(
+                        EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 1, ev.channel, ev.rssi, 0.0,
+                        msg,
+                        "ตัดการเชื่อมต่อทันที, สแกนหาตำแหน่ง BSSID แปลกปลอม")]
         known.add(bssid)
         return []
 

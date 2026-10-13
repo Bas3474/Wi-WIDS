@@ -80,6 +80,26 @@ class TestEvilTwin(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertIn("airgeddon", out[0].impact)
 
+    def test_dorm_campus_same_oui_peaceful_accepted(self):
+        # เน็ตหอพัก/มหาวิทยาลัย: Router 2 ตัวยี่ห้อเดียวกัน (OUI เดียวกัน) ไม่มี Deauth -> ไม่เตือนผิดพลาด
+        d = EvilTwinDetector([])
+        d.feed(Event("beacon", 1, "BE:27:7A:00:11:22", bssid="BE:27:7A:00:11:22", ssid="CampusWiFi", channel=1))
+        out = d.feed(Event("beacon", 2, "BE:27:7A:00:33:44", bssid="BE:27:7A:00:33:44", ssid="CampusWiFi", channel=6))
+        self.assertEqual(out, [])
+
+    def test_dorm_campus_profile_multi_ap(self):
+        # ตั้ง profile แบบ multi_ap: true กระจายหลายช่องสัญญาณ (1, 6, 11)
+        dorm_prof = [{"ssid": "DormNet", "bssids": ["BE:27:7A:00:11:22"], "channels": [6], "multi_ap": True}]
+        d = EvilTwinDetector(dorm_prof)
+        # Router จุดที่ 2 ของหอพักบนช่อง 11 (OUI เดียวกัน)
+        out1 = d.feed(Event("beacon", 1, "BE:27:7A:00:33:44", bssid="BE:27:7A:00:33:44", ssid="DormNet", channel=11))
+        self.assertEqual(out1, [])
+        # แต่ถ้ามี Deauth ถล่มแล้วมี AP โผล่มา -> ตรวจจับได้ทันที!
+        d.feed(Event("deauth", 2, "XX:XX:XX:XX:XX:XX", bssid="BE:27:7A:00:11:22", ssid="DormNet"))
+        out2 = d.feed(Event("beacon", 3, "00:C0:CA:99:99:99", bssid="00:C0:CA:99:99:99", ssid="DormNet", channel=6))
+        self.assertEqual(len(out2), 1)
+        self.assertEqual(out2[0].attack_type, "Evil Twin")
+
 
 class TestRecon(unittest.TestCase):
     def test_probe_flood(self):
