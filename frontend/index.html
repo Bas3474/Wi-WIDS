@@ -53,6 +53,9 @@
     <div class="rounded-lg p-4 transition-all duration-500" :class="statusClass">
       <div class="text-xs opacity-80">System Threat Status</div>
       <div class="text-2xl font-bold">{{ threatStatus === 'Calibrating' ? 'Warming Up (' + warmupSec + 's)' : threatStatus }}</div>
+      <div v-if="latestActiveIncident && threatStatus !== 'Normal' && threatStatus !== 'Calibrating'" class="text-xs font-mono mt-1 opacity-90 truncate">
+        🎯 📶 {{ latestActiveIncident.ssid || latestActiveIncident.bssid }} ({{ latestActiveIncident.attack_type }})
+      </div>
     </div>
     <div class="bg-slate-800 rounded-lg p-4"><div class="text-xs text-slate-400">Total</div><div class="text-2xl font-bold">{{ total }}</div></div>
     <div class="bg-slate-800 rounded-lg p-4"><div class="text-xs text-slate-400">Critical</div><div class="text-2xl font-bold text-red-400">{{ counts.Critical || 0 }}</div></div>
@@ -78,29 +81,35 @@
       </div>
       <div class="overflow-x-auto max-h-96 overflow-y-auto">
         <table class="w-full text-sm">
-          <thead class="text-left text-slate-400 sticky top-0 bg-slate-800">
+          <thead class="text-left text-slate-400 sticky top-0 bg-slate-800 text-xs">
             <tr>
-              <th class="py-1">เวลา</th>
+              <th class="py-1.5 pl-2">เวลา</th>
+              <th>SSID (ชื่อ Wi-Fi)</th>
               <th>ประเภท</th>
               <th>ระดับ</th>
-              <th>Sensor ที่ตรวจพบ</th>
-              <th>Source MAC</th>
+              <th>BSSID / MAC</th>
+              <th>Sensor</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="i in incidents" :key="i.id" @click="selected = i"
-                class="border-t border-slate-700 hover:bg-slate-700 cursor-pointer">
-              <td class="py-1.5 whitespace-nowrap">{{ fmt(i.timestamp) }}</td>
-              <td>{{ i.attack_type }}</td>
-              <td><span class="px-2 rounded text-xs" :class="badge(i.severity)">{{ i.severity }}</span></td>
-              <td>
+                class="border-t border-slate-700/80 hover:bg-slate-700/70 cursor-pointer transition-colors">
+              <td class="py-2 pl-2 whitespace-nowrap text-xs font-mono text-slate-400">{{ fmt(i.timestamp) }}</td>
+              <td class="whitespace-nowrap">
+                <span class="font-semibold text-sky-300 flex items-center gap-1.5">
+                  <span class="text-sky-400">📶</span> {{ i.ssid || '(ไม่ระบุ/Hidden)' }}
+                </span>
+              </td>
+              <td class="font-medium whitespace-nowrap">{{ i.attack_type }}</td>
+              <td><span class="px-2 py-0.5 rounded text-xs font-semibold" :class="badge(i.severity)">{{ i.severity }}</span></td>
+              <td class="font-mono text-xs text-slate-300 whitespace-nowrap">{{ i.bssid || i.src_mac || '-' }}</td>
+              <td class="whitespace-nowrap">
                 <span class="px-2 py-0.5 rounded text-xs font-mono" :class="sourceBadge(i.source)">
                   {{ formatSource(i.source) }}
                 </span>
               </td>
-              <td class="font-mono text-xs">{{ i.src_mac }}</td>
             </tr>
-            <tr v-if="!incidents.length"><td colspan="5" class="py-6 text-center text-slate-500">ยังไม่มีเหตุการณ์</td></tr>
+            <tr v-if="!incidents.length"><td colspan="6" class="py-6 text-center text-slate-500">ยังไม่มีเหตุการณ์</td></tr>
           </tbody>
         </table>
       </div>
@@ -108,15 +117,37 @@
   </div>
 
   <!-- Detail modal -->
-  <div v-if="selected" class="fixed inset-0 bg-black/60 flex items-center justify-center p-4" @click.self="selected = null">
-    <div class="bg-slate-800 rounded-lg p-5 w-full max-w-md space-y-2">
+  <div v-if="selected" class="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" @click.self="selected = null">
+    <div class="bg-slate-800 rounded-lg p-5 w-full max-w-lg space-y-3">
       <div class="flex justify-between items-center">
-        <h3 class="text-lg font-bold">{{ selected.attack_type }}</h3>
-        <button @click="selected = null" class="text-slate-400 text-xl">✕</button>
+        <div>
+          <h3 class="text-lg font-bold">{{ selected.attack_type }}</h3>
+          <div class="text-xs text-sky-400 font-medium">🎯 Target Wi-Fi: {{ selected.ssid || '(ไม่ระบุ SSID)' }}</div>
+        </div>
+        <button @click="selected = null" class="text-slate-400 text-xl hover:text-white">✕</button>
       </div>
-      <span class="px-2 rounded text-xs" :class="badge(selected.severity)">{{ selected.severity }}</span>
-      <span class="ml-2 text-xs text-slate-400">layer: {{ selected.layer }}<template v-if="selected.layer !== '802.11'"> (heuristic)</template></span>
-      <dl class="grid grid-cols-3 gap-y-1 text-sm pt-2">
+      <div class="flex items-center gap-2">
+        <span class="px-2 py-0.5 rounded text-xs font-semibold" :class="badge(selected.severity)">{{ selected.severity }}</span>
+        <span class="text-xs text-slate-400">layer: {{ selected.layer }}<template v-if="selected.layer !== '802.11'"> (heuristic)</template></span>
+      </div>
+
+      <!-- nmcli device wifi style terminal box -->
+      <div class="bg-slate-950 border border-slate-700/80 rounded-lg p-3 font-mono text-xs space-y-1.5 shadow-inner">
+        <div class="text-slate-400 font-semibold border-b border-slate-800 pb-1 flex justify-between items-center text-[11px]">
+          <span>💻 NMCLI VIEW (Wi-Fi Device Parameters)</span>
+          <span class="text-[10px] text-sky-400">nmcli dev wifi list</span>
+        </div>
+        <div class="grid grid-cols-2 gap-2 pt-1 text-[11px]">
+          <div><span class="text-slate-500">SSID:</span> <span class="text-sky-300 font-bold ml-1">{{ selected.ssid || '(Hidden/Unknown)' }}</span></div>
+          <div><span class="text-slate-500">BSSID:</span> <span class="text-slate-200 ml-1">{{ selected.bssid || '-' }}</span></div>
+          <div><span class="text-slate-500">CHAN:</span> <span class="text-amber-300 ml-1">{{ selected.channel ? 'CH ' + selected.channel : '-' }}</span></div>
+          <div><span class="text-slate-500">SIGNAL:</span> <span class="ml-1" :class="signalColor(selected.rssi)">{{ formatSignal(selected.rssi) }}</span></div>
+          <div><span class="text-slate-500">SRC MAC:</span> <span class="text-rose-300 ml-1">{{ selected.src_mac || '-' }}</span></div>
+          <div><span class="text-slate-500">RATE:</span> <span class="text-slate-300 ml-1">{{ selected.frame_rate ? selected.frame_rate + ' f/s' : '-' }}</span></div>
+        </div>
+      </div>
+
+      <dl class="grid grid-cols-3 gap-y-1.5 text-sm pt-1 border-t border-slate-700">
         <dt class="text-slate-400">ตรวจพบโดย</dt>
         <dd class="col-span-2">
           <span class="px-2 py-0.5 rounded text-xs font-mono" :class="sourceBadge(selected.source)">
@@ -124,14 +155,9 @@
           </span>
         </dd>
         <dt class="text-slate-400">เวลา</dt><dd class="col-span-2">{{ new Date(selected.timestamp*1000).toLocaleString() }}</dd>
-        <dt class="text-slate-400">Source MAC</dt><dd class="col-span-2 font-mono">{{ selected.src_mac }}</dd>
-        <dt class="text-slate-400">SSID / BSSID</dt><dd class="col-span-2">{{ selected.ssid }} / <span class="font-mono">{{ selected.bssid }}</span></dd>
-        <dt class="text-slate-400">Victims</dt><dd class="col-span-2">{{ selected.victim_count }}</dd>
-        <dt class="text-slate-400">Channel</dt><dd class="col-span-2">{{ selected.channel }}</dd>
-        <dt class="text-slate-400">RSSI</dt><dd class="col-span-2">{{ selected.rssi }} dBm</dd>
-        <dt class="text-slate-400">Frame rate</dt><dd class="col-span-2">{{ selected.frame_rate }} /s</dd>
-        <dt class="text-slate-400">Impact</dt><dd class="col-span-2">{{ selected.impact }}</dd>
-        <dt class="text-slate-400">Action</dt><dd class="col-span-2">{{ selected.action }}</dd>
+        <dt class="text-slate-400">Victims</dt><dd class="col-span-2">{{ selected.victim_count }} เครื่อง</dd>
+        <dt class="text-slate-400">Impact</dt><dd class="col-span-2 text-rose-300 font-medium">{{ selected.impact }}</dd>
+        <dt class="text-slate-400">Action</dt><dd class="col-span-2 text-emerald-300 font-medium">{{ selected.action }}</dd>
       </dl>
     </div>
   </div>
@@ -159,6 +185,9 @@ createApp({
     const now = ref(Date.now() / 1000); setInterval(() => now.value = Date.now() / 1000, 1000);
     const recentCritical = computed(() => incidents.value.some(i => i.severity === 'Critical' && now.value - i.timestamp < 60));
     const recentSuspicious = computed(() => incidents.value.some(i => (i.severity === 'Suspicious' || i.severity === 'Critical') && now.value - i.timestamp < 120));
+    const latestActiveIncident = computed(() => {
+      return incidents.value.find(i => (i.severity === 'Critical' || i.severity === 'Suspicious') && now.value - i.timestamp < 120);
+    });
 
     const threatStatus = computed(() => {
       if (warmupSec.value > 0) return 'Calibrating';
@@ -174,8 +203,24 @@ createApp({
       Calibrating: 'bg-indigo-700/80 border border-indigo-400 text-indigo-100 animate-pulse',
     }[threatStatus.value]));
 
-    const badge = s => ({ Critical: 'bg-red-600', Suspicious: 'bg-yellow-600 text-black', Normal: 'bg-green-700' }[s]);
-    const fmt = t => new Date(t * 1000).toLocaleTimeString();
+    const badge = s => ({ Critical: 'bg-red-600 text-white', Suspicious: 'bg-yellow-600 text-black', Normal: 'bg-green-700 text-white' }[s]);
+    const fmt = t => new Date(t * 1000).toLocaleTimeString('th-TH', { hour12: false });
+
+    function formatSignal(rssi) {
+      if (!rssi) return '-';
+      let bars = '▂▄▆█';
+      if (rssi < -80) bars = '▂___';
+      else if (rssi < -70) bars = '▂▄__';
+      else if (rssi < -60) bars = '▂▄▆_';
+      return `${rssi} dBm ${bars}`;
+    }
+
+    function signalColor(rssi) {
+      if (!rssi) return 'text-slate-400';
+      if (rssi >= -60) return 'text-emerald-400 font-bold';
+      if (rssi >= -75) return 'text-amber-400';
+      return 'text-rose-400';
+    }
 
     function formatSource(src) {
       if (!src || src === 'live') return '💻 Laptop';
@@ -243,8 +288,20 @@ createApp({
 
     function connect() {
       ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
-      ws.onopen = () => { connected.value = true; loadStatus(); loadIncidents(); };
+      ws.onopen = () => {
+        connected.value = true;
+        loadStatus();
+        loadIncidents();
+        if (!window._wsPingInterval) {
+          window._wsPingInterval = setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              try { ws.send('ping'); } catch (e) {}
+            }
+          }, 10000);
+        }
+      };
       ws.onclose = () => { connected.value = false; setTimeout(connect, 2000); };  // auto-reconnect
+      ws.onerror = () => { connected.value = false; };
       ws.onmessage = e => {
         const m = JSON.parse(e.data);
         if (m.type === 'frames') {
@@ -275,7 +332,7 @@ createApp({
     return { incidents, counts, total, mode, connected, muted, query, selected,
              sensors, onlineSensors, totalSensorEvents, formatSource, sourceBadge,
              threatStatus, statusClass, badge, fmt, loadIncidents, simulate,
-             warmupSec, clearHistory };
+             warmupSec, clearHistory, formatSignal, signalColor, latestActiveIncident };
   },
 }).mount('#app');
 </script>

@@ -283,7 +283,7 @@ async def ws_endpoint(ws: WebSocket):
     try:
         while True:
             await ws.receive_text()  # keep-alive
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, Exception):
         pass
     finally:
         hub.clients.discard(ws)

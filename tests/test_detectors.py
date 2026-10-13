@@ -80,40 +80,29 @@ class TestEvilTwin(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertIn("airgeddon", out[0].impact)
 
-    def test_dorm_campus_same_oui_peaceful_accepted(self):
-        # เน็ตหอพัก/มหาวิทยาลัย: Router 2 ตัวยี่ห้อเดียวกัน (OUI เดียวกัน) ไม่มี Deauth -> ไม่เตือนผิดพลาด
-        d = EvilTwinDetector([])
-        d.feed(Event("beacon", 1, "BE:27:7A:00:11:22", bssid="BE:27:7A:00:11:22", ssid="CampusWiFi", channel=1))
-        out = d.feed(Event("beacon", 2, "BE:27:7A:00:33:44", bssid="BE:27:7A:00:33:44", ssid="CampusWiFi", channel=6))
-        self.assertEqual(out, [])
-
-    def test_dorm_campus_profile_multi_ap(self):
-        # ตั้ง profile แบบ multi_ap: true กระจายหลายช่องสัญญาณ (1, 6, 11)
-        dorm_prof = [{"ssid": "DormNet", "bssids": ["BE:27:7A:00:11:22"], "channels": [6], "multi_ap": True}]
-        d = EvilTwinDetector(dorm_prof)
-        # Router จุดที่ 2 ของหอพักบนช่อง 11 (OUI เดียวกัน)
-        out1 = d.feed(Event("beacon", 1, "BE:27:7A:00:33:44", bssid="BE:27:7A:00:33:44", ssid="DormNet", channel=11))
-        self.assertEqual(out1, [])
-        # แต่ถ้ามี Deauth ถล่มแล้วมี AP โผล่มา -> ตรวจจับได้ทันที!
-        d.feed(Event("deauth", 2, "XX:XX:XX:XX:XX:XX", bssid="BE:27:7A:00:11:22", ssid="DormNet"))
-        out2 = d.feed(Event("beacon", 3, "00:C0:CA:99:99:99", bssid="00:C0:CA:99:99:99", ssid="DormNet", channel=6))
-        self.assertEqual(len(out2), 1)
-        self.assertEqual(out2[0].attack_type, "Evil Twin")
-
-    def test_dorm_campus_multi_ap_foreign_oui_detected_without_deauth(self):
-        # โหมด multi_ap: หากมีผู้โจมตีปล่อย AP สวมรอยด้วยยี่ห้ออื่น (Foreign OUI) แม้ยังไม่ยิง Deauth ก็ต้องตรวจจับทันที
-        dorm_prof = [{"ssid": "DormNet", "bssids": ["BE:27:7A:00:11:22"], "channels": [6], "multi_ap": True}]
-        d = EvilTwinDetector(dorm_prof)
-        out = d.feed(Event("beacon", 1, "00:C0:CA:99:99:99", bssid="00:C0:CA:99:99:99", ssid="DormNet", channel=6))
+    def test_rogue_bssid_without_deauth_detected(self):
+        # BSSID แปลกปลอมปล่อย SSID เดียวกัน ตรวจจับ Evil Twin ทันทีแม้ไม่ได้ยิง Deauth
+        prof = [{"ssid": "MySecureNet", "bssids": ["BE:27:7A:00:11:22"], "channels": [6]}]
+        d = EvilTwinDetector(prof)
+        out = d.feed(Event("beacon", 1, "00:C0:CA:99:99:99", bssid="00:C0:CA:99:99:99", ssid="MySecureNet", channel=6))
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].attack_type, "Evil Twin")
-        self.assertIn("Vendor OUI Mismatch", out[0].impact)
+        self.assertEqual(out[0].severity, "Critical")
+
+    def test_dynamic_second_ap_detected_immediately(self):
+        # โหมด Dynamic: หากพบ AP ที่สองปล่อย SSID เดียวกัน ตรวจจับเป็น Evil Twin ทันที
+        d = EvilTwinDetector([])
+        d.feed(Event("beacon", 1, "AA:BB:CC:11:22:33", bssid="AA:BB:CC:11:22:33", ssid="TestNet", channel=6))
+        out = d.feed(Event("beacon", 2, "66:66:66:66:66:66", bssid="66:66:66:66:66:66", ssid="TestNet", channel=6))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].attack_type, "Evil Twin")
+        self.assertEqual(out[0].severity, "Critical")
 
     def test_simulate_attacks_evil_twin_scenario(self):
         # ตรวจสอบว่าเหตุการณ์จำลองจาก simulate_attacks.py ส่งผลให้เกิด Evil Twin alert
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
         import simulate_attacks as sim
-        d = EvilTwinDetector([{"ssid": sim.SSID, "bssids": [sim.AP], "channels": [6], "multi_ap": True}])
+        d = EvilTwinDetector([{"ssid": sim.SSID, "bssids": [sim.AP], "channels": [6]}])
         evs = [Event(e["kind"], 10.0 + i, e.get("src", ""), bssid=e.get("bssid", ""), ssid=e.get("ssid", ""), channel=e.get("channel", 1))
                for i, e in enumerate(sim.evil_twin())]
         out = []
