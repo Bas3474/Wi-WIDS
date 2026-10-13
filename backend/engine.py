@@ -1,5 +1,6 @@
 """รวม detector ทั้งหมด รับ Event จากหลายแหล่ง (sniffer/net monitor/remote sensor) แล้วส่ง Incident ออก"""
 import threading
+import time
 from collections import Counter
 from typing import Callable
 
@@ -16,6 +17,8 @@ class Engine:
         self.emit = emit
         self.lock = threading.Lock()
         self.frames: Counter = Counter()
+        self.start_time = time.time()
+        self.startup_grace_sec = float(cfg.get("startup_grace_sec", 15.0))
         self.detectors = [
             D.DeauthDetector(**th.get("deauth", {})),
             D.EvilTwinDetector(cfg.get("profiles", [])),
@@ -25,6 +28,12 @@ class Engine:
             D.DnsDetector(net.get("dns_expected"), net.get("trusted_resolvers")),
         ]
 
+    def grace_remaining(self) -> int:
+        return max(0, int(self.startup_grace_sec - (time.time() - self.start_time)))
+
+    def is_in_grace_period(self) -> bool:
+        return (time.time() - self.start_time) < self.startup_grace_sec
+
     def feed(self, ev: D.Event, source: str = "live") -> None:
         if ev.kind not in D.KINDS:
             return
@@ -32,6 +41,10 @@ class Engine:
             if ev.kind in FRAME_LABEL:
                 self.frames[FRAME_LABEL[ev.kind]] += 1
             found = [d for det in self.detectors for d in det.feed(ev)]
+        if self.is_in_grace_period():
+            # ช่วงเวลาเริ่มต้นระบบ (Startup Grace Period): ให้ detectors เรียนรู้ baseline แวดล้อม
+            # แต่เว้นการส่งแจ้งเตือน เพื่อไม่ให้เกิด false alarm จากสัญญาณที่เปิดค้างอยู่เดิม
+            return
         for d in found:  # emit นอก lock เพื่อไม่ให้ callback ค้าง engine
             self.emit(Incident(timestamp=ev.ts, source=source, **d.__dict__))
 

@@ -64,3 +64,9 @@ def counts_by_severity() -> dict:
     with _conn() as c:
         rows = c.execute("SELECT severity, COUNT(*) n FROM incidents GROUP BY severity").fetchall()
     return {r["severity"]: r["n"] for r in rows}
+
+
+def clear_all() -> None:
+    with _conn() as c:
+        with c:
+            c.execute("DELETE FROM incidents")

@@ -50,9 +50,9 @@
 
   <!-- Summary cards -->
   <section class="grid grid-cols-2 md:grid-cols-4 gap-3">
-    <div class="rounded-lg p-4" :class="statusClass">
+    <div class="rounded-lg p-4 transition-all duration-500" :class="statusClass">
       <div class="text-xs opacity-80">System Threat Status</div>
-      <div class="text-2xl font-bold">{{ threatStatus }}</div>
+      <div class="text-2xl font-bold">{{ threatStatus === 'Calibrating' ? 'Warming Up (' + warmupSec + 's)' : threatStatus }}</div>
     </div>
     <div class="bg-slate-800 rounded-lg p-4"><div class="text-xs text-slate-400">Total</div><div class="text-2xl font-bold">{{ total }}</div></div>
     <div class="bg-slate-800 rounded-lg p-4"><div class="text-xs text-slate-400">Critical</div><div class="text-2xl font-bold text-red-400">{{ counts.Critical || 0 }}</div></div>
@@ -74,6 +74,7 @@
         <a :href="'/api/export.csv' + (query ? '?q=' + encodeURIComponent(query) : '')"
            class="bg-blue-600 hover:bg-blue-500 rounded px-3 py-1.5 text-sm">⬇ CSV</a>
         <button @click="simulate" class="bg-slate-600 hover:bg-slate-500 rounded px-3 py-1.5 text-sm">+ จำลองเหตุการณ์</button>
+        <button @click="clearHistory" class="bg-rose-900/60 hover:bg-rose-800/80 border border-rose-600/50 rounded px-3 py-1.5 text-sm text-rose-200">🗑️ ล้างประวัติ</button>
       </div>
       <div class="overflow-x-auto max-h-96 overflow-y-auto">
         <table class="w-full text-sm">
@@ -143,19 +144,36 @@ createApp({
   setup() {
     const incidents = ref([]), counts = ref({}), total = ref(0), mode = ref('-');
     const connected = ref(false), muted = ref(false), query = ref(''), selected = ref(null);
-    const sensors = ref([]), laptopSniffer = ref(false);
+    const sensors = ref([]), laptopSniffer = ref(false), warmupSec = ref(0);
     const frames = { Beacon: 0, Probe: 0, Auth: 0, Deauth: 0 };
     let chart, ws, audioCtx;
 
     const onlineSensors = computed(() => (sensors.value || []).filter(s => s && s.online));
     const totalSensorEvents = computed(() => onlineSensors.value.reduce((acc, s) => acc + (s.total || 0), 0));
 
-    const threatStatus = computed(() => (counts.value.Critical || 0) && recentCritical.value ? 'Critical'
-      : (counts.value.Suspicious || 0) || (counts.value.Critical || 0) ? 'Suspicious' : 'Normal');
-    // Critical ภายใน 60 วินาทีล่าสุด = สถานะ Critical, ไม่งั้นลดระดับ
+    // สถานะสดของระบบ:
+    // - หากกำลังวอร์มอัพปรับเทียบสัญญาณตอนเริ่มต้น -> Calibrating
+    // - มีเหตุการณ์ Critical ใน 60 วินาทีล่าสุด -> Critical
+    // - มีเหตุการณ์ Suspicious ใน 120 วินาทีล่าสุด -> Suspicious
+    // - ไม่อยู่ในภาวะโจมตี -> Normal (สีเขียวปกติ)
     const now = ref(Date.now() / 1000); setInterval(() => now.value = Date.now() / 1000, 1000);
     const recentCritical = computed(() => incidents.value.some(i => i.severity === 'Critical' && now.value - i.timestamp < 60));
-    const statusClass = computed(() => ({ Normal: 'bg-green-700', Suspicious: 'bg-yellow-600', Critical: 'bg-red-700 animate-pulse' }[threatStatus.value]));
+    const recentSuspicious = computed(() => incidents.value.some(i => (i.severity === 'Suspicious' || i.severity === 'Critical') && now.value - i.timestamp < 120));
+
+    const threatStatus = computed(() => {
+      if (warmupSec.value > 0) return 'Calibrating';
+      if (recentCritical.value) return 'Critical';
+      if (recentSuspicious.value) return 'Suspicious';
+      return 'Normal';
+    });
+
+    const statusClass = computed(() => ({
+      Normal: 'bg-green-700',
+      Suspicious: 'bg-yellow-600',
+      Critical: 'bg-red-700 animate-pulse',
+      Calibrating: 'bg-indigo-700/80 border border-indigo-400 text-indigo-100 animate-pulse',
+    }[threatStatus.value]));
+
     const badge = s => ({ Critical: 'bg-red-600', Suspicious: 'bg-yellow-600 text-black', Normal: 'bg-green-700' }[s]);
     const fmt = t => new Date(t * 1000).toLocaleTimeString();
 
@@ -187,11 +205,41 @@ createApp({
       counts.value = s.counts; total.value = s.total; mode.value = s.mode;
       if (s.sensors) sensors.value = s.sensors;
       if (s.laptop_sniffer !== undefined) laptopSniffer.value = s.laptop_sniffer;
+      if (s.warmup_sec !== undefined) warmupSec.value = s.warmup_sec;
     }
     async function loadIncidents() {
       incidents.value = await (await fetch('/api/incidents?q=' + encodeURIComponent(query.value))).json();
     }
-    async function simulate() { await fetch('/api/simulate', { method: 'POST' }); }
+    function getHeaders() {
+      const token = localStorage.getItem('token') || '';
+      return token ? { 'X-Token': token } : {};
+    }
+
+    async function authFetch(url, options = {}) {
+      options.headers = { ...getHeaders(), ...(options.headers || {}) };
+      let res = await fetch(url, options);
+      if (res.status === 401) {
+        const token = prompt('API นี้ต้องใช้รหัสยืนยันตัวตน (DASHBOARD_TOKEN) กรุณากรอกรหัส:');
+        if (token) {
+          localStorage.setItem('token', token);
+          options.headers = { ...options.headers, 'X-Token': token };
+          res = await fetch(url, options);
+        }
+      }
+      return res;
+    }
+
+    async function simulate() { await authFetch('/api/simulate', { method: 'POST' }); }
+
+    async function clearHistory() {
+      if (!confirm('ยืนยันล้างประวัติเหตุการณ์ทั้งหมด เพื่อเริ่มต้นใหม่ใช่หรือไม่?')) return;
+      const res = await authFetch('/api/clear', { method: 'POST' });
+      if (res.ok) {
+        incidents.value = [];
+        counts.value = {};
+        total.value = 0;
+      }
+    }
 
     function connect() {
       ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
@@ -204,6 +252,7 @@ createApp({
           chart.data.datasets[0].data = Object.values(frames); chart.update('none');
           if (m.sensors) sensors.value = m.sensors;
           if (m.laptop_sniffer !== undefined) laptopSniffer.value = m.laptop_sniffer;
+          if (m.warmup_sec !== undefined) warmupSec.value = m.warmup_sec;
         } else if (m.type === 'incident') {
           if (!query.value) incidents.value.unshift(m.data);
           counts.value[m.data.severity] = (counts.value[m.data.severity] || 0) + 1;
@@ -225,7 +274,8 @@ createApp({
 
     return { incidents, counts, total, mode, connected, muted, query, selected,
              sensors, onlineSensors, totalSensorEvents, formatSource, sourceBadge,
-             threatStatus, statusClass, badge, fmt, loadIncidents, simulate };
+             threatStatus, statusClass, badge, fmt, loadIncidents, simulate,
+             warmupSec, clearHistory };
   },
 }).mount('#app');
 </script>

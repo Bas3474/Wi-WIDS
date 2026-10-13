@@ -9,6 +9,7 @@
     11
   ],
   "hop_interval_sec": 0.4,
+  "startup_grace_sec": 15.0,
   "profiles": [
     {
       "ssid": "Yes_Yes_Yes",

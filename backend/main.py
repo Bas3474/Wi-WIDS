@@ -133,7 +133,14 @@ async def live_loop() -> None:
         await asyncio.sleep(1)
         now = time.time()
         s_list = get_online_sensors(now)
-        await hub.broadcast({"type": "frames", "data": engine.pop_frame_counts(), "sensors": s_list, "laptop_sniffer": has_laptop})
+        warmup = engine.grace_remaining() if engine else 0
+        await hub.broadcast({
+            "type": "frames",
+            "data": engine.pop_frame_counts(),
+            "sensors": s_list,
+            "laptop_sniffer": has_laptop,
+            "warmup_sec": warmup,
+        })
 
 
 @asynccontextmanager
@@ -181,10 +188,20 @@ def status():
     cfg = load_config()
     has_laptop = bool(cfg.get("interface") and os.name != "nt")
     sensors_info = get_online_sensors(now)
+    warmup = engine.grace_remaining() if engine else 0
     return {"mode": os.getenv("MODE", "mock"), "counts": c, "total": sum(c.values()),
             "line_configured": bool(os.getenv("LINE_CHANNEL_ACCESS_TOKEN")),
             "laptop_sniffer": has_laptop,
-            "sensors": sensors_info}
+            "sensors": sensors_info,
+            "warmup_sec": warmup}
+
+
+@app.post("/api/clear")
+def clear_history(x_token: Optional[str] = Header(None)):
+    """ล้างประวัติเหตุการณ์ทั้งหมด (สำหรับเริ่มต้นการทดสอบใหม่)"""
+    check_token(x_token)
+    db.clear_all()
+    return {"status": "ok"}
 
 
 @app.get("/api/incidents")

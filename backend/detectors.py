@@ -234,12 +234,16 @@ class EvilTwinDetector(Detector):
                     msg = f"ตรวจพบ AP ที่ 2 ใช้ชื่อ SSID '{ssid}' ซ้ำกับ AP เดิม (BSSID: {bssid})"
                     if has_recent_deauth:
                         msg += " ร่วมกับการยิง Deauth ตัดสัญญาณ AP จริง (รูปแบบการโจมตี Evil Twin + Captive Portal ของ airgeddon)"
+                        return [Detection(
+                            EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 1, ev.channel, ev.rssi, 0.0,
+                            msg,
+                            "ตัดการเชื่อมต่อทันที, สแกนหาตำแหน่ง BSSID แปลกปลอม")]
                     elif not same_vendor:
-                        msg += " และตรวจพบว่าเป็นคนละยี่ห้อ/การ์ดเครือข่ายแปลกปลอม (Vendor OUI Mismatch)"
-                    return [Detection(
-                        EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 1, ev.channel, ev.rssi, 0.0,
-                        msg,
-                        "ตัดการเชื่อมต่อทันที, สแกนหาตำแหน่ง BSSID แปลกปลอม")]
+                        msg += " และตรวจพบว่าเป็นคนละยี่ห้อ (Vendor OUI Mismatch) — ยังไม่พบการตัดสัญญาณ"
+                        return [Detection(
+                            EVIL_TWIN, SUSPICIOUS, L2, bssid, bssid, ssid, 1, ev.channel, ev.rssi, 0.0,
+                            msg,
+                            "เฝ้าระวัง หากพบการตัดสัญญาณหรือหลุดบ่อยครั้งให้ตรวจสอบ")]
         known.add(bssid)
         return []
 
