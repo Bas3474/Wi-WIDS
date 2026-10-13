@@ -86,6 +86,17 @@ engine: Optional[Engine] = None
 active_sensors: dict[str, dict] = {}
 
 
+def record_sensor(name: str, accepted: int) -> None:
+    now = time.time()
+    cur = active_sensors.get(name, {"events_total": 0})
+    active_sensors[name] = {
+        "last_seen": now,
+        "events_total": cur["events_total"] + accepted,
+        "last_count": accepted,
+    }
+    print(f"📡 [SENSOR] จาก {name}: รับ {accepted} events (รวมสะสม: {active_sensors[name]['events_total']})")
+
+
 async def live_loop() -> None:
     """ส่งสถิติเฟรมต่อวินาทีให้กราฟ และสถานะ sensor ภายนอก"""
     while True:
@@ -111,7 +122,7 @@ async def lifespan(app: FastAPI):
         task = asyncio.create_task(mock_loop())
     else:
         task = asyncio.create_task(live_loop())
-        threads = sniffer.start_all(engine, cfg)
+        threads = sniffer.start_all(engine, cfg, on_sensor=record_sensor)
     yield
     if task:
         task.cancel()

@@ -1,16 +1,25 @@
 /*
- * ESP32 Layer-2 sensor: ดักเฟรม 802.11 (promiscuous) แล้วส่งเป็น event เข้า /api/ingest
- * ตรวจ: deauth/disassoc, beacon (Evil Twin), probe_req, auth, eapol
- *
- * ข้อจำกัด: ESP32 เชื่อมต่อ Wi-Fi เพื่อส่งข้อมูล จึงฟังได้เฉพาะ "ช่องเดียวกับ AP ที่เชื่อมต่ออยู่"
- * (วางให้ตรงกับช่องของ AP ที่ต้องเฝ้า) ดู docs/SENSOR_PROTOCOL.md
- * ยังไม่เคยคอมไพล์/ทดสอบกับบอร์ดจริง
+ * ESP32 Layer-2 sensor: ดักเฟรม 802.11 (promiscuous) แล้วส่งเข้า Backend
+ * รองรับ 2 โหมด (ตั้งค่าใน config.h):
+ *   1. USE_USB_SERIAL = 1 (ค่าเริ่มต้น): ส่งผ่านสาย USB Serial เข้าคอมโดยตรง
+ *      - ไม่ต้องต่อ Wi-Fi AP, ไม่หลุดแม้โดนยิง Deauth Flood, และสลับสแกนได้หลายช่อง (Channel Hopping)
+ *   2. USE_USB_SERIAL = 0: ต่อ Wi-Fi แล้วส่งผ่าน HTTP POST ไปที่ /api/ingest
  */
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include "esp_wifi.h"
 #include "config.h"
+
+#ifndef USE_USB_SERIAL
+#define USE_USB_SERIAL 1
+#endif
+#ifndef HOP_CHANNELS
+#define HOP_CHANNELS {1, 6, 11}
+#endif
+#ifndef HOP_INTERVAL_MS
+#define HOP_INTERVAL_MS 350
+#endif
 
 enum Kind : uint8_t { K_DEAUTH, K_BEACON, K_PROBE, K_AUTH, K_EAPOL };
 static const char* KIND_NAME[] = {"deauth", "beacon", "probe_req", "auth", "eapol"};
@@ -24,24 +33,27 @@ struct Ev {
 };
 
 static QueueHandle_t evQueue;
+static const uint8_t hopChannels[] = HOP_CHANNELS;
+static const size_t numChannels = sizeof(hopChannels) / sizeof(hopChannels[0]);
+static size_t chIndex = 0;
 
-// Beacon ถี่มาก (~10/วินาที/AP) ส่งต่อ BSSID ไม่เกินทุก 5 วินาทีก็พอสำหรับตรวจ Evil Twin
+// Beacon ถี่มาก (~10/วินาที/AP) ส่งต่อ BSSID ไม่เกินทุก 3 วินาทีก็พอสำหรับตรวจ Evil Twin + กราฟ
 struct BeaconSeen { uint8_t bssid[6]; uint32_t t; };
-static BeaconSeen beaconSeen[24];
+static BeaconSeen beaconSeen[32];
 static uint8_t beaconNext = 0;
 
 static bool beaconDue(const uint8_t* b) {
   uint32_t now = millis();
   for (auto& s : beaconSeen) {
     if (memcmp(s.bssid, b, 6) == 0) {
-      if (now - s.t < 5000) return false;
+      if (now - s.t < 3000) return false;
       s.t = now;
       return true;
     }
   }
   memcpy(beaconSeen[beaconNext].bssid, b, 6);
   beaconSeen[beaconNext].t = now;
-  beaconNext = (beaconNext + 1) % 24;
+  beaconNext = (beaconNext + 1) % 32;
   return true;
 }
 
@@ -60,7 +72,6 @@ static void parseTags(const uint8_t* d, int len, int off, Ev& e) {
   }
 }
 
-// callback ทำงานใน WiFi task: ต้องเร็ว ไม่ block จึงส่งเข้า queue แล้วให้ loop() ส่ง HTTP
 static void onPacket(void* buf, wifi_promiscuous_pkt_type_t type) {
   auto* p = (wifi_promiscuous_pkt_t*)buf;
   const uint8_t* d = p->payload;
@@ -102,19 +113,17 @@ static void onPacket(void* buf, wifi_promiscuous_pkt_type_t type) {
     static const uint8_t eapolLlc[8] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E};
     if (memcmp(d + off, eapolLlc, 8) != 0) return;
     e.kind = K_EAPOL;
-    // ToDS: addr1=BSSID | FromDS: addr2=BSSID
     memcpy(e.bssid, (fc1 & 0x01) ? d + 4 : d + 10, 6);
   } else {
     return;
   }
-  xQueueSend(evQueue, &e, 0);   // เต็มก็ทิ้ง (flood เกินรับไหว)
+  xQueueSend(evQueue, &e, 0);
 }
 
 static void macStr(const uint8_t* m, char* out) {
   snprintf(out, 18, "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
 }
 
-// SSID อาจมีไบต์แปลก ๆ ทำให้ JSON พัง -> เหลือเฉพาะ ASCII ที่พิมพ์ได้
 static void appendEvent(String& out, const Ev& e) {
   char s[18], dst[18], b[18];
   macStr(e.src, s); macStr(e.dst, dst); macStr(e.bssid, b);
@@ -133,6 +142,7 @@ static void appendEvent(String& out, const Ev& e) {
   out += "}";
 }
 
+#if !USE_USB_SERIAL
 static void connectWifi() {
   esp_wifi_set_promiscuous(false);
   WiFi.disconnect();
@@ -146,10 +156,11 @@ static void connectWifi() {
     Serial.println("WiFi connect failed");
   }
 }
+#endif
 
 void setup() {
   Serial.begin(115200);
-  evQueue = xQueueCreate(200, sizeof(Ev));
+  evQueue = xQueueCreate(250, sizeof(Ev));
   WiFi.mode(WIFI_STA);
 
   wifi_promiscuous_filter_t filt = {
@@ -157,15 +168,43 @@ void setup() {
   };
   esp_wifi_set_promiscuous_filter(&filt);
   esp_wifi_set_promiscuous_rx_cb(&onPacket);
+
+#if USE_USB_SERIAL
+  WiFi.disconnect();
+  esp_wifi_set_promiscuous(true);
+  if (numChannels > 0) {
+    esp_wifi_set_channel(hopChannels[0], WIFI_SECOND_CHAN_NONE);
+  }
+  Serial.println("USB Serial Sniffer started (Promiscuous + Channel Hopping)");
+#else
   connectWifi();
+#endif
 }
 
 void loop() {
-  static uint32_t last = 0;
-  if (millis() - last < 1000) { delay(20); return; }
-  last = millis();
+  uint32_t now = millis();
 
+#if USE_USB_SERIAL
+  // สลับช่องสัญญาณ (Channel Hopping)
+  static uint32_t lastHop = 0;
+  if (numChannels > 1 && now - lastHop >= HOP_INTERVAL_MS) {
+    lastHop = now;
+    chIndex = (chIndex + 1) % numChannels;
+    esp_wifi_set_channel(hopChannels[chIndex], WIFI_SECOND_CHAN_NONE);
+  }
+#endif
+
+  // ส่งข้อมูลทุก 500 ms
+  static uint32_t lastSend = 0;
+  if (now - lastSend < 500) {
+    delay(10);
+    return;
+  }
+  lastSend = now;
+
+#if !USE_USB_SERIAL
   if (WiFi.status() != WL_CONNECTED) { connectWifi(); return; }
+#endif
 
   String body = "{\"sensor\":\"" SENSOR_NAME "\",\"events\":[";
   Ev e;
@@ -177,6 +216,11 @@ void loop() {
   if (n == 0) return;
   body += "]}";
 
+  // ส่งผ่านสาย USB Serial เสมอ (Backend อ่านบรรทัดที่ขึ้นต้นด้วย WIDS_JSON:)
+  Serial.print("WIDS_JSON:");
+  Serial.println(body);
+
+#if !USE_USB_SERIAL
   HTTPClient http;
   http.begin(SERVER_URL);
   http.addHeader("Content-Type", "application/json");
@@ -184,4 +228,5 @@ void loop() {
   int code = http.POST(body);
   Serial.printf("sent %d events -> HTTP %d\n", n, code);
   http.end();
+#endif
 }

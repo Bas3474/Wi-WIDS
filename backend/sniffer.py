@@ -124,22 +124,114 @@ class NetSniffer(_Capture):
         super().__init__(iface, engine, net_to_event, bpf="arp or udp port 53")
 
 
-def start_all(engine, cfg: dict) -> list:
-    """เริ่ม sniffer ตาม config; บน Windows หรือไม่ได้เปิด Monitor Mode จะข้ามอย่างปลอดภัยเพื่อรอรับจาก ESP32"""
+class SerialSniffer(threading.Thread):
+    """อ่านข้อมูลจาก ESP32 Sniffer ผ่านสาย USB Serial โดยตรง (ทั้ง Windows COMx และ Linux ttyUSBx/ttyACMx)"""
+    daemon = True
+
+    def __init__(self, port_cfg: str, baud: int, engine, on_sensor=None):
+        super().__init__(name="serial-sniffer")
+        self.port_cfg = (port_cfg or "auto").strip()
+        self.baud = int(baud or 115200)
+        self.engine = engine
+        self.on_sensor = on_sensor
+        self._stop_evt = threading.Event()
+
+    def stop(self):
+        self._stop_evt.set()
+
+    def _find_port(self) -> Optional[str]:
+        import serial.tools.list_ports
+        if self.port_cfg and self.port_cfg.lower() != "auto":
+            return self.port_cfg
+        for p in serial.tools.list_ports.comports():
+            dev = p.device or ""
+            desc = (p.description or "").lower()
+            if (p.vid is not None or "usb" in dev.lower() or "acm" in dev.lower()
+                    or any(k in desc for k in ("cp210", "ch340", "ch910", "uart", "jtag", "esp", "serial"))):
+                if dev.startswith("/dev/ttyS"):
+                    continue
+                return dev
+        return None
+
+    def _process_line(self, line: str, port: str) -> None:
+        import json
+        import time
+        from detectors import KINDS
+        if "WIDS_JSON:" in line:
+            raw = line.split("WIDS_JSON:", 1)[1].strip()
+        elif line.startswith("{") and '"events"' in line:
+            raw = line
+        else:
+            return
+        data = json.loads(raw)
+        sensor = data.get("sensor", "esp32-usb")
+        events = data.get("events", [])
+        now = time.time()
+        accepted = 0
+        for e in events:
+            kind = e.get("kind", "")
+            if kind not in KINDS:
+                continue
+            self.engine.feed(
+                Event(kind, e.get("ts") or now, e.get("src", ""), e.get("dst", ""),
+                      e.get("bssid", ""), e.get("ssid", ""), int(e.get("channel") or 0),
+                      int(e.get("rssi") or 0), e.get("extra") or {}),
+                source=f"sensor:{sensor}",
+            )
+            accepted += 1
+        if accepted and self.on_sensor:
+            self.on_sensor(f"{sensor} ({port})", accepted)
+
+    def run(self):
+        try:
+            import serial
+        except ImportError:
+            log.warning("ไม่ได้ติดตั้ง pyserial -> ข้ามการอ่าน ESP32 ผ่านสาย USB")
+            return
+
+        while not self._stop_evt.is_set():
+            port = self._find_port()
+            if not port:
+                self._stop_evt.wait(2.0)
+                continue
+            try:
+                with serial.Serial(port, self.baud, timeout=1.0) as ser:
+                    print(f"🔌 [USB-SERIAL] เชื่อมต่อ ESP32 ผ่านสายที่พอร์ต {port} ({self.baud} baud) สำเร็จ!")
+                    while not self._stop_evt.is_set():
+                        raw_bytes = ser.readline()
+                        if not raw_bytes:
+                            continue
+                        line = raw_bytes.decode("utf-8", errors="ignore").strip()
+                        if line:
+                            try:
+                                self._process_line(line, port)
+                            except Exception:
+                                pass
+            except Exception:
+                self._stop_evt.wait(2.0)
+
+
+def start_all(engine, cfg: dict, on_sensor=None) -> list:
+    """เริ่ม sniffer ตาม config; รองรับทั้งสาย USB Serial (ESP32) และ Monitor Mode (Linux)"""
     import os
     from pathlib import Path
     threads = []
+
+    # 1. เริ่มตัวรับข้อมูลผ่านสาย USB Serial จาก ESP32 (ทั้งบน Windows และ Linux)
+    serial_port = cfg.get("serial_port", "auto")
+    if serial_port and str(serial_port).lower() != "none":
+        threads.append(SerialSniffer(str(serial_port), int(cfg.get("serial_baud", 115200)), engine, on_sensor))
+
+    # 2. เริ่ม Monitor Mode ในเครื่อง (เฉพาะกรณีตั้งค่า interface บน Linux)
     iface = cfg.get("interface", "").strip()
     if os.name == "nt":
-        log.info("โหมด Windows: ข้าม Monitor Mode ในเครื่อง (รอรับข้อมูลจาก ESP32 ผ่าน /api/ingest)")
+        log.info("โหมด Windows: รับข้อมูลจาก ESP32 (สาย USB Serial / Wi-Fi /api/ingest)")
     elif iface:
         if Path(f"/sys/class/net/{iface}").exists():
             threads.append(MonitorSniffer(iface, engine, cfg.get("channels", [1, 6, 11]),
                                           cfg.get("hop_interval_sec", 0.4)))
         else:
-            log.info("ไม่พบ interface '%s' ในเครื่อง -> รอรับข้อมูลจาก ESP32 ผ่าน /api/ingest", iface)
-    else:
-        log.info("ไม่ได้ตั้ง 'interface' ใน config.json -> รอรับข้อมูลจาก ESP32 ผ่าน /api/ingest")
+            log.info("ไม่พบ interface '%s' -> รับข้อมูลจาก ESP32 (สาย USB / Wi-Fi)", iface)
     if cfg.get("net_interface") and os.name != "nt":
         threads.append(NetSniffer(cfg["net_interface"], engine))
     for t in threads:

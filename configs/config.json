@@ -1,4 +1,6 @@
 {
+  "serial_port": "auto",
+  "serial_baud": 115200,
   "interface": "",
   "net_interface": "",
   "channels": [
