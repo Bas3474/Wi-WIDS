@@ -82,7 +82,13 @@ def dns():
                  extra={"qname": f"x{random.randint(1000, 9999)}.example.com", "answers": ["192.168.1.99"]})]
 
 
-SCENARIOS = {"deauth": deauth, "evil_twin": evil_twin, "recon": recon,
+def auth_dos():
+    # จำลอง mdk3/mdk4 auth flood: ยิง authentication request รัว ๆ เข้า AP ด้วย MAC สุ่ม
+    return [dict(kind="auth", src=rmac(), dst=AP, bssid=AP, ssid=SSID, channel=6, rssi=-48)
+            for _ in range(40)]
+
+
+SCENARIOS = {"deauth": deauth, "auth_dos": auth_dos, "evil_twin": evil_twin, "recon": recon,
              "wpa": wpa, "mitm": mitm, "dns": dns}
 
 

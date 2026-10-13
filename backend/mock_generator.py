@@ -27,6 +27,9 @@ PROFILES = {
     AttackType.CAPTIVE_PHISH: (Severity.CRITICAL, Layer.DNS,
                                "DNS ถูกเปลี่ยนเส้นทางไปหน้าล็อกอินปลอม (heuristic)",
                                "ปิด AP ปลอม, แจ้งผู้ใช้เปลี่ยนรหัสผ่าน", (2, 15), (1, 10)),
+    AttackType.AUTH_DOS: (Severity.CRITICAL, Layer.L2,
+                          "พบการยิง Authentication Flood ถล่ม AP จนคิวเชื่อมต่อเต็ม (Auth DoS)",
+                          "เปิดใช้งาน 802.11w (PMF), เปิด Rate Limiting บน AP, ตรวจหาพิกัดสัญญาณผู้โจมตี", (40, 250), (1, 15)),
 }
 
 

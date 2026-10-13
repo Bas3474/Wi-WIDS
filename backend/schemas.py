@@ -11,6 +11,7 @@ class AttackType(str, Enum):
     WPA_CRACK = "WPA Key Cracking"
     RECON = "Recon / Probe Flood"
     CAPTIVE_PHISH = "Captive Portal Phishing"
+    AUTH_DOS = "Auth DoS Attack"
 
 
 class Severity(str, Enum):

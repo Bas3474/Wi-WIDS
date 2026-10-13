@@ -4,7 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 
-from detectors import (ArpDetector, DeauthDetector, DnsDetector, Event,  # noqa: E402
+from detectors import (ArpDetector, AuthDosDetector, DeauthDetector, DnsDetector, Event,  # noqa: E402
                        EvilTwinDetector, ReconDetector, WpaCrackDetector)
 
 AP = "AA:BB:CC:11:22:33"
@@ -16,6 +16,36 @@ def feed_all(det, events):
     for e in events:
         out += det.feed(e)
     return out
+
+
+class TestAuthDos(unittest.TestCase):
+    def test_auth_flood_detected(self):
+        # ยิง Auth request ถี่ผิดปกติ 30 เฟรมในเวลาสั้น ๆ
+        ev = [Event("auth", i * 0.1, ATK, AP, AP, channel=6) for i in range(30)]
+        out = feed_all(AuthDosDetector(threshold=15), ev)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].attack_type, "Auth DoS Attack")
+        self.assertEqual(out[0].severity, "Critical")
+
+    def test_normal_rate_ignored(self):
+        # อัตราปกติ: มี client ต่อ Wi-Fi ห่าง ๆ กัน ไม่ควรแจ้งเตือน
+        ev = [Event("auth", i * 2.0, ATK, AP, AP, channel=6) for i in range(10)]
+        out = feed_all(AuthDosDetector(threshold=15), ev)
+        self.assertEqual(out, [])
+
+    def test_randomized_src_mac_flood_detected(self):
+        # จำลอง mdk3/mdk4 auth flood: ผู้โจมตีสุ่ม MAC ทุกแพ็กเก็ต
+        ev = [Event("auth", i * 0.05, f"00:11:22:33:44:{i:02X}", AP, AP, channel=6) for i in range(25)]
+        out = feed_all(AuthDosDetector(threshold=15), ev)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].attack_type, "Auth DoS Attack")
+        self.assertIn("MAC ปลอมแปลง", out[0].impact)
+
+    def test_other_kind_ignored(self):
+        # เฟรมที่ไม่ใช่ auth ไม่ควรถูกตรวจจับ
+        ev = [Event("beacon", i * 0.1, ATK, AP, AP, channel=6) for i in range(30)]
+        out = feed_all(AuthDosDetector(threshold=15), ev)
+        self.assertEqual(out, [])
 
 
 class TestDeauth(unittest.TestCase):

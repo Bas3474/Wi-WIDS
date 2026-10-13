@@ -38,6 +38,10 @@
       "window": 30.0,
       "threshold": 2,
       "threshold_no_deauth": 12
+    },
+    "auth_dos": {
+      "window": 5.0,
+      "threshold": 15
     }
   }
 }

@@ -19,6 +19,7 @@ MITM = "MITM"
 WPA_CRACK = "WPA Key Cracking"
 RECON = "Recon / Probe Flood"
 CAPTIVE = "Captive Portal Phishing"
+AUTH_DOS = "Auth DoS Attack"
 CRITICAL, SUSPICIOUS = "Critical", "Suspicious"
 L2, L3, DNS = "802.11", "ARP/IP", "DNS"
 
@@ -130,6 +131,52 @@ class DeauthDetector(Detector):
             round(len(q) / self.window, 1),
             "Client ถูกตัดการเชื่อมต่อซ้ำ ๆ" + (" (broadcast ทั้ง BSS)" if bcast else ""),
             "ตรวจสอบต้นทาง MAC, เปิดใช้ 802.11w (PMF)")]
+
+
+class AuthDosDetector(Detector):
+    """6. ตรวจจับ Authentication Flood / Auth DoS Attack (mdk3/mdk4/scapy Auth Flood)
+    ตรวจจับเมื่อมีการยิงเฟรม 802.11 Authentication Request ถล่ม Access Point (BSSID) ในเวลาสั้น ๆ
+    เพื่อทำให้ตาราง Client / Authentication State ของ AP ล้น จน Client อื่นเชื่อมต่อไม่ได้
+    """
+
+    def __init__(self, window=5.0, threshold=15, cooldown=None):
+        super().__init__(cooldown)
+        self.window, self.threshold = window, threshold
+        self.win: dict = defaultdict(deque)
+
+    def feed(self, ev):
+        if ev.kind != "auth":
+            return []
+        src = norm_mac(ev.src)
+        bssid = norm_mac(ev.bssid)
+        dst = norm_mac(ev.dst)
+
+        # เป้าหมายหลักคือ AP ที่ถูกโจมตี (BSSID หรือ Destination ที่ไม่ใช่ Broadcast)
+        target = bssid if (bssid and bssid != BROADCAST) else (dst if (dst and dst != BROADCAST) else "")
+        if not target:
+            return []
+
+        q = self.win[target]
+        q.append((ev.ts, src, ev.rssi, ev.channel))
+        _slide(q, ev.ts, self.window)
+        _gc(self.win, ev.ts, self.window)
+
+        if len(q) < self.threshold or not self._ready(target, ev.ts):
+            return []
+
+        sources = {s for _, s, _, _ in q if s and s != BROADCAST}
+        rate = round(len(q) / self.window, 1)
+        primary_src = src or (q[-1][1] if q else "")
+        if len(sources) > 3:
+            impact = f"พบการยิง Authentication Flood (Auth DoS) ถล่ม AP ({len(sources)} MAC ปลอมแปลง, {rate} เฟรม/วิ) เสี่ยงทำให้ AP หน่วยความจำเต็ม/ค้าง"
+        else:
+            impact = f"พบการส่ง Authentication Request ถี่ผิดปกติ ({len(q)} ครั้ง ใน {self.window} วินาที, {rate} เฟรม/วิ) ไปยัง AP"
+
+        return [Detection(
+            AUTH_DOS, CRITICAL, L2, primary_src, target, ev.ssid,
+            len(sources), ev.channel, ev.rssi, rate,
+            impact,
+            "เปิดใช้งาน 802.11w (PMF / Management Frame Protection), ตั้งค่า Rate Limiting บน AP, ตรวจหาพิกัดสัญญาณผู้โจมตี")]
 
 
 class EvilTwinDetector(Detector):

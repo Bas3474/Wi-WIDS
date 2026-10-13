@@ -26,6 +26,7 @@ class Engine:
                 self.bssid_to_ssid[D.norm_mac(b)] = s
         self.detectors = [
             D.DeauthDetector(**th.get("deauth", {})),
+            D.AuthDosDetector(**th.get("auth_dos", {})),
             D.EvilTwinDetector(cfg.get("profiles", [])),
             D.ReconDetector(**th.get("recon", {})),
             D.WpaCrackDetector(**th.get("wpa", {})),
