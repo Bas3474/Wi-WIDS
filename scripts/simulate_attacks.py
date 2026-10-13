@@ -88,8 +88,14 @@ def auth_dos():
             for _ in range(40)]
 
 
-SCENARIOS = {"deauth": deauth, "auth_dos": auth_dos, "evil_twin": evil_twin, "recon": recon,
-             "wpa": wpa, "mitm": mitm, "dns": dns}
+def beacon_flood():
+    # จำลอง mdk3/mdk4 beacon flood: สร้าง AP ปลอม 35 ตัวต่าง BSSID และ SSID บนช่องสัญญาณเดียวกัน
+    return [dict(kind="beacon", src=rmac(), bssid=rmac(), ssid=f"FreeWiFi_{i}", channel=6, rssi=-60)
+            for i in range(35)]
+
+
+SCENARIOS = {"deauth": deauth, "auth_dos": auth_dos, "beacon_flood": beacon_flood,
+             "evil_twin": evil_twin, "recon": recon, "wpa": wpa, "mitm": mitm, "dns": dns}
 
 
 def send(url, token, name, events):

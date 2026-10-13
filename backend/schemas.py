@@ -12,6 +12,7 @@ class AttackType(str, Enum):
     RECON = "Recon / Probe Flood"
     CAPTIVE_PHISH = "Captive Portal Phishing"
     AUTH_DOS = "Auth DoS Attack"
+    BEACON_FLOOD = "Beacon Flood / AP Anomaly"
 
 
 class Severity(str, Enum):

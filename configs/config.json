@@ -42,6 +42,11 @@
     "auth_dos": {
       "window": 5.0,
       "threshold": 15
+    },
+    "beacon_flood": {
+      "window": 5.0,
+      "threshold": 25,
+      "single_ap_threshold": 75
     }
   }
 }

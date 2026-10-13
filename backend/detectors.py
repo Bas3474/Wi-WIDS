@@ -20,6 +20,7 @@ WPA_CRACK = "WPA Key Cracking"
 RECON = "Recon / Probe Flood"
 CAPTIVE = "Captive Portal Phishing"
 AUTH_DOS = "Auth DoS Attack"
+BEACON_FLOOD = "Beacon Flood / AP Anomaly"
 CRITICAL, SUSPICIOUS = "Critical", "Suspicious"
 L2, L3, DNS = "802.11", "ARP/IP", "DNS"
 
@@ -268,6 +269,72 @@ class EvilTwinDetector(Detector):
                     msg,
                     "ตัดการเชื่อมต่อทันที, สแกนหาตำแหน่ง BSSID แปลกปลอม")]
         known.add(bssid)
+        return []
+
+
+class BeaconFloodDetector(Detector):
+    """8. ตรวจจับ Beacon Flood Attack และ AP Beacon Anomaly (mdk3/mdk4/ESP8266 Fake AP Spammer)
+    - กรณีที่ 1 (Beacon Flood): ตรวจพบ AP/BSSID ปลอมแปลงปริมาณมากผิดปกติถูกประกาศขึ้นมาบนช่องสัญญาณพร้อมๆ กัน
+    - กรณีที่ 2 (AP Beacon Anomaly): ตรวจพบ AP ตัวใดตัวหนึ่งส่งเฟรม Beacon ถี่เกินมาตรฐานอย่างรุนแรง แย่งชิง Airtime
+    """
+
+    def __init__(self, window=5.0, threshold=25, single_ap_threshold=75, cooldown=None):
+        super().__init__(cooldown)
+        self.window = window
+        self.threshold = threshold                  # จำนวน unique BSSID ใน window (ค่าเริ่มต้น 25)
+        self.single_ap_threshold = single_ap_threshold  # จำนวน beacon จาก AP เดียวใน window (ค่าเริ่มต้น 75, ปกติ ~10/s)
+        self.ch_win: dict[int, deque] = defaultdict(deque)     # channel -> deque[(ts, bssid, ssid, rssi)]
+        self.ap_win: dict[str, deque] = defaultdict(deque)     # bssid -> deque[(ts, channel, rssi)]
+
+    def feed(self, ev: Event) -> list[Detection]:
+        if ev.kind != "beacon":
+            return []
+        bssid = norm_mac(ev.bssid or ev.src)
+        if not bssid or bssid == BROADCAST:
+            return []
+        ch = ev.channel or 0
+
+        # 1. บันทึกและเลื่อนหน้าต่างเวลาสำหรับช่องสัญญาณ (ตรวจจับ Multi-AP Beacon Flood)
+        ch_q = self.ch_win[ch]
+        ch_q.append((ev.ts, bssid, ev.ssid or "", ev.rssi))
+        _slide(ch_q, ev.ts, self.window)
+        _gc(self.ch_win, ev.ts, self.window)
+
+        # 2. บันทึกและเลื่อนหน้าต่างเวลาสำหรับ BSSID รายตัว (ตรวจจับ Single AP Beacon Anomaly)
+        ap_q = self.ap_win[bssid]
+        ap_q.append((ev.ts, ch, ev.rssi))
+        _slide(ap_q, ev.ts, self.window)
+        _gc(self.ap_win, ev.ts, self.window)
+
+        # ตรวจสอบกรณีที่ 1: Beacon Flood (ตรวจพบ Fake APs / BSSIDs จำนวนมากพร้อมกัน)
+        unique_bssids = {b for _, b, _, _ in ch_q}
+        if len(unique_bssids) >= self.threshold:
+            flood_key = f"bcast_flood_{ch}"
+            if self._ready(flood_key, ev.ts):
+                unique_ssids = {s for _, _, s, _ in ch_q if s}
+                rate = round(len(ch_q) / self.window, 1)
+                impact = (f"พบการแพร่กระจายเฟรม Beacon ปลอมจำนวนมาก (Beacon Flood) บนช่อง {ch} "
+                          f"({len(unique_bssids)} BSSID / {len(unique_ssids)} SSID, {rate} เฟรม/วิ) "
+                          f"เสี่ยงทำให้ตัวสแกน Wi-Fi ของเครื่อง Client ค้าง")
+                return [Detection(
+                    BEACON_FLOOD, CRITICAL, L2, bssid, bssid, ev.ssid,
+                    len(unique_bssids), ch, ev.rssi, rate,
+                    impact,
+                    "หลีกเลี่ยงการเชื่อมต่อ Wi-Fi แปลกปลอม, ตรวจหาตำแหน่งผู้โจมตี (mdk3/mdk4/ESP8266 Beacon Spammer)")]
+
+        # ตรวจสอบกรณีที่ 2: Single AP Beacon Anomaly (AP ตัวเดียวส่ง Beacon ถี่ผิดปกติอย่างรุนแรง)
+        if len(ap_q) >= self.single_ap_threshold:
+            ap_key = f"bcast_anomaly_{bssid}"
+            if self._ready(ap_key, ev.ts):
+                rate = round(len(ap_q) / self.window, 1)
+                impact = (f"พบ AP ({bssid}) ส่งเฟรม Beacon ถี่ผิดปกติอย่างรุนแรง ({len(ap_q)} ครั้ง ใน {self.window} วิ, "
+                          f"{rate} เฟรม/วิ) ก่อให้เกิดความผิดปกติของช่องสัญญาณ (AP Beacon Anomaly / Airtime Hogging)")
+                return [Detection(
+                    BEACON_FLOOD, SUSPICIOUS, L2, bssid, bssid, ev.ssid,
+                    1, ch, ev.rssi, rate,
+                    impact,
+                    "ตรวจสอบการตั้งค่า Beacon Interval ของ AP (มาตรฐาน 100ms) หรือตรวจสอบว่ามีมัลแวร์/อุปกรณ์ผิดปกติ")]
+
         return []
 
 

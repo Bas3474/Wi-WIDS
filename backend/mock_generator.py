@@ -30,6 +30,9 @@ PROFILES = {
     AttackType.AUTH_DOS: (Severity.CRITICAL, Layer.L2,
                           "พบการยิง Authentication Flood ถล่ม AP จนคิวเชื่อมต่อเต็ม (Auth DoS)",
                           "เปิดใช้งาน 802.11w (PMF), เปิด Rate Limiting บน AP, ตรวจหาพิกัดสัญญาณผู้โจมตี", (40, 250), (1, 15)),
+    AttackType.BEACON_FLOOD: (Severity.CRITICAL, Layer.L2,
+                              "พบการส่ง Beacon ปริมาณมหาศาล (Beacon Flood / AP Beacon Anomaly)",
+                              "หลีกเลี่ยงการเชื่อมต่อ AP ปลอม, ตรวจหาตำแหน่งผู้โจมตี", (100, 500), (5, 50)),
 }
 
 

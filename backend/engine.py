@@ -27,6 +27,7 @@ class Engine:
         self.detectors = [
             D.DeauthDetector(**th.get("deauth", {})),
             D.AuthDosDetector(**th.get("auth_dos", {})),
+            D.BeaconFloodDetector(**th.get("beacon_flood", {})),
             D.EvilTwinDetector(cfg.get("profiles", [])),
             D.ReconDetector(**th.get("recon", {})),
             D.WpaCrackDetector(**th.get("wpa", {})),
@@ -51,7 +52,7 @@ class Engine:
             if not ev.ssid and ev.bssid:
                 ev.ssid = self.bssid_to_ssid.get(D.norm_mac(ev.bssid), "")
             found = [d for det in self.detectors for d in det.feed(ev)]
-        if self.is_in_grace_period() and source != "simulator":
+        if self.is_in_grace_period() and "simulator" not in source:
             # ช่วงเวลาเริ่มต้นระบบ (Startup Grace Period): ให้ detectors เรียนรู้ baseline แวดล้อม
             # แต่เว้นการส่งแจ้งเตือน เพื่อไม่ให้เกิด false alarm จากสัญญาณที่เปิดค้างอยู่เดิม
             return

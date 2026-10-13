@@ -4,7 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 
-from detectors import (ArpDetector, AuthDosDetector, DeauthDetector, DnsDetector, Event,  # noqa: E402
+from detectors import (ArpDetector, AuthDosDetector, BeaconFloodDetector, DeauthDetector, DnsDetector, Event,  # noqa: E402
                        EvilTwinDetector, ReconDetector, WpaCrackDetector)
 
 AP = "AA:BB:CC:11:22:33"
@@ -16,6 +16,44 @@ def feed_all(det, events):
     for e in events:
         out += det.feed(e)
     return out
+
+
+class TestBeaconFlood(unittest.TestCase):
+    def test_beacon_flood_multi_ap_detected(self):
+        # มี 30 AP ปลอมต่าง BSSID ปรากฏขึ้นมาบนช่อง 6 ในเวลาสั้นๆ
+        ev = [Event("beacon", i * 0.1, f"00:11:22:33:44:{i:02X}", bssid=f"00:11:22:33:44:{i:02X}", ssid=f"Fake_{i}", channel=6)
+              for i in range(30)]
+        out = feed_all(BeaconFloodDetector(threshold=25), ev)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].attack_type, "Beacon Flood / AP Anomaly")
+        self.assertEqual(out[0].severity, "Critical")
+        self.assertIn("Beacon Flood", out[0].impact)
+
+    def test_normal_ap_beacons_ignored(self):
+        # มี AP ปกติ 5 ตัวในสิ่งแวดล้อม ส่ง beacon ต่อเนื่อง ไม่ควรแจ้งเตือน
+        ev = []
+        for i in range(20):
+            for ap_idx in range(5):
+                b = f"AA:BB:CC:DD:EE:{ap_idx:02X}"
+                ev.append(Event("beacon", i * 0.2, b, bssid=b, ssid=f"Net_{ap_idx}", channel=6))
+        out = feed_all(BeaconFloodDetector(threshold=25, single_ap_threshold=75), ev)
+        self.assertEqual(out, [])
+
+    def test_single_ap_beacon_anomaly_detected(self):
+        # AP ตัวเดียวส่ง beacon รัวเกินมาตรฐานอย่างรุนแรง (80 เฟรม ใน 4 วินาที)
+        ev = [Event("beacon", i * 0.05, AP, bssid=AP, ssid="SpamAP", channel=6) for i in range(80)]
+        out = feed_all(BeaconFloodDetector(threshold=25, single_ap_threshold=75), ev)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].attack_type, "Beacon Flood / AP Anomaly")
+        self.assertEqual(out[0].severity, "Suspicious")
+        self.assertIn("AP Beacon Anomaly", out[0].impact)
+
+    def test_cooldown_prevents_flood_spam(self):
+        # เมื่อเกิด Beacon Flood ต่อเนื่อง Cooldown ต้องป้องกันการแจ้งเตือนรัว
+        ev = [Event("beacon", i * 0.05, f"00:11:22:33:44:{i:02X}", bssid=f"00:11:22:33:44:{i:02X}", ssid=f"Fake_{i}", channel=6)
+              for i in range(60)]
+        out = feed_all(BeaconFloodDetector(threshold=25), ev)
+        self.assertEqual(len(out), 1)
 
 
 class TestAuthDos(unittest.TestCase):
