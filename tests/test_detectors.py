@@ -100,6 +100,28 @@ class TestEvilTwin(unittest.TestCase):
         self.assertEqual(len(out2), 1)
         self.assertEqual(out2[0].attack_type, "Evil Twin")
 
+    def test_dorm_campus_multi_ap_foreign_oui_detected_without_deauth(self):
+        # โหมด multi_ap: หากมีผู้โจมตีปล่อย AP สวมรอยด้วยยี่ห้ออื่น (Foreign OUI) แม้ยังไม่ยิง Deauth ก็ต้องตรวจจับทันที
+        dorm_prof = [{"ssid": "DormNet", "bssids": ["BE:27:7A:00:11:22"], "channels": [6], "multi_ap": True}]
+        d = EvilTwinDetector(dorm_prof)
+        out = d.feed(Event("beacon", 1, "00:C0:CA:99:99:99", bssid="00:C0:CA:99:99:99", ssid="DormNet", channel=6))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].attack_type, "Evil Twin")
+        self.assertIn("Vendor OUI Mismatch", out[0].impact)
+
+    def test_simulate_attacks_evil_twin_scenario(self):
+        # ตรวจสอบว่าเหตุการณ์จำลองจาก simulate_attacks.py ส่งผลให้เกิด Evil Twin alert
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+        import simulate_attacks as sim
+        d = EvilTwinDetector([{"ssid": sim.SSID, "bssids": [sim.AP], "channels": [6], "multi_ap": True}])
+        evs = [Event(e["kind"], 10.0 + i, e.get("src", ""), bssid=e.get("bssid", ""), ssid=e.get("ssid", ""), channel=e.get("channel", 1))
+               for i, e in enumerate(sim.evil_twin())]
+        out = []
+        for ev in evs:
+            out += d.feed(ev)
+        self.assertGreaterEqual(len(out), 1)
+        self.assertEqual(out[0].attack_type, "Evil Twin")
+
 
 class TestRecon(unittest.TestCase):
     def test_probe_flood(self):

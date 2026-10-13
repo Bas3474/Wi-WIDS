@@ -41,7 +41,7 @@ class Engine:
             if ev.kind in FRAME_LABEL:
                 self.frames[FRAME_LABEL[ev.kind]] += 1
             found = [d for det in self.detectors for d in det.feed(ev)]
-        if self.is_in_grace_period():
+        if self.is_in_grace_period() and source != "simulator":
             # ช่วงเวลาเริ่มต้นระบบ (Startup Grace Period): ให้ detectors เรียนรู้ baseline แวดล้อม
             # แต่เว้นการส่งแจ้งเตือน เพื่อไม่ให้เกิด false alarm จากสัญญาณที่เปิดค้างอยู่เดิม
             return

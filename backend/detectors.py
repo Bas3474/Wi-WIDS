@@ -191,13 +191,10 @@ class EvilTwinDetector(Detector):
                 if bssid in allowed:
                     bad_bssid = False
                 elif is_multi_ap and same_vendor and not has_recent_deauth:
-                    # โหมดเน็ตหอพัก/มหาลัย: ยี่ห้อเดียวกัน (OUI ตรงกัน) และไม่มีการยิง Deauth -> เป็น Router จุดอื่นที่ปลอดภัย
-                    bad_bssid = False
-                elif is_multi_ap and not has_recent_deauth:
-                    # โหมดเน็ตหอพัก/มหาลัย: มีหลาย Router ทำงานร่วมกันอย่างสงบ ไม่มีการยิง Deauth
+                    # โหมดเน็ตหอพัก/มหาลัย: ยี่ห้อเดียวกัน (OUI ตรงกัน เช่น BE:27:7A) และไม่มีการยิง Deauth -> เป็น Router จุดอื่นที่ปลอดภัย
                     bad_bssid = False
                 else:
-                    # นอก Whitelist และไม่ใช่ multi_ap หรือมีการยิง Deauth ตัดสัญญาณ -> ตรวจพบ Evil Twin!
+                    # ไม่อยู่ใน Whitelist (คนละยี่ห้อ หรือมีการยิง Deauth ตัดสัญญาณ) -> ตรวจพบ Evil Twin!
                     bad_bssid = True
 
             bad_chan = bool(chans) and ev.channel and ev.channel not in chans
@@ -207,6 +204,8 @@ class EvilTwinDetector(Detector):
 
             if (bad_bssid or bad_chan) and self._ready(f"{ssid}_{bssid}", ev.ts):
                 why = "BSSID ไม่อยู่ใน profile" if bad_bssid else f"อยู่ช่อง {ev.channel} ผิดจาก profile"
+                if not same_vendor and allowed:
+                    why += " และตรวจพบคนละยี่ห้อ (Vendor OUI Mismatch)"
                 msg = f"พบ Evil Twin (airgeddon Rogue AP) ใช้ SSID '{ssid}' ({why})"
                 if has_recent_deauth:
                     msg += " ร่วมกับการยิง Deauth ตัดสัญญาณ AP จริง (airgeddon Attack Pattern)"
@@ -239,11 +238,11 @@ class EvilTwinDetector(Detector):
                             msg,
                             "ตัดการเชื่อมต่อทันที, สแกนหาตำแหน่ง BSSID แปลกปลอม")]
                     elif not same_vendor:
-                        msg += " และตรวจพบว่าเป็นคนละยี่ห้อ (Vendor OUI Mismatch) — ยังไม่พบการตัดสัญญาณ"
+                        msg += " และตรวจพบว่าเป็นคนละยี่ห้อ/การ์ดเครือข่ายแปลกปลอม (Vendor OUI Mismatch)"
                         return [Detection(
-                            EVIL_TWIN, SUSPICIOUS, L2, bssid, bssid, ssid, 1, ev.channel, ev.rssi, 0.0,
+                            EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 1, ev.channel, ev.rssi, 0.0,
                             msg,
-                            "เฝ้าระวัง หากพบการตัดสัญญาณหรือหลุดบ่อยครั้งให้ตรวจสอบ")]
+                            "ตัดการเชื่อมต่อทันที, สแกนหาตำแหน่ง BSSID แปลกปลอม")]
         known.add(bssid)
         return []
 

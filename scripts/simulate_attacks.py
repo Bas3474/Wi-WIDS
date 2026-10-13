@@ -13,7 +13,28 @@ import json
 import random
 import urllib.request
 
+from pathlib import Path
+
+CFG_PATH = Path(__file__).resolve().parent.parent / "configs" / "config.json"
+SSID = "CampusWiFi"
 AP = "AA:BB:CC:11:22:33"
+GW_IP = "192.168.1.1"
+
+if CFG_PATH.exists():
+    try:
+        cfg = json.loads(CFG_PATH.read_text(encoding="utf-8"))
+        profiles = cfg.get("profiles", [])
+        if profiles:
+            p = profiles[0]
+            SSID = p.get("ssid", SSID)
+            bssids = p.get("bssids", [])
+            if bssids:
+                AP = bssids[0]
+        net = cfg.get("network", {})
+        if net.get("gateway_ip"):
+            GW_IP = net["gateway_ip"]
+    except Exception:
+        pass
 
 
 def rmac() -> str:
@@ -22,13 +43,22 @@ def rmac() -> str:
 
 def deauth():
     atk = rmac()
-    return [dict(kind="deauth", src=atk, dst="FF:FF:FF:FF:FF:FF", bssid=AP, channel=6, rssi=-45)
+    return [dict(kind="deauth", src=atk, dst="FF:FF:FF:FF:FF:FF", bssid=AP, ssid=SSID, channel=6, rssi=-45)
             for _ in range(60)]
 
 
 def evil_twin():
     fake = rmac()
-    return [dict(kind="beacon", src=fake, bssid=fake, ssid="CampusWiFi", channel=11, rssi=-50)]
+    atk = rmac()
+    # ส่ง 3 เฟรมจำลอง Evil Twin / airgeddon pattern:
+    # 1. Legit AP beacon (ให้ dynamic baseline รู้จักหากไม่มีใน profile)
+    # 2. Deauth frame ตัดสัญญาณจาก AP จริง (พฤติกรรมเฉพาะของ airgeddon)
+    # 3. Rogue AP beacon สวมรอย SSID เดียวกันจาก BSSID แปลกปลอม
+    return [
+        dict(kind="beacon", src=AP, bssid=AP, ssid=SSID, channel=6, rssi=-40),
+        dict(kind="deauth", src=atk, dst="FF:FF:FF:FF:FF:FF", bssid=AP, ssid=SSID, channel=6, rssi=-45),
+        dict(kind="beacon", src=fake, bssid=fake, ssid=SSID, channel=11, rssi=-50),
+    ]
 
 
 def recon():
@@ -37,18 +67,18 @@ def recon():
 
 
 def wpa():
-    bssid, atk = rmac(), rmac()
-    return ([dict(kind="deauth", src=atk, dst=rmac(), bssid=bssid, channel=6)]
+    bssid, atk = AP, rmac()
+    return ([dict(kind="deauth", src=atk, dst=rmac(), bssid=bssid, ssid=SSID, channel=6)]
             + [dict(kind="eapol", src=rmac(), bssid=bssid, channel=6) for _ in range(10)])
 
 
 def mitm():
-    return [dict(kind="arp", src=rmac(), extra={"ip": "192.168.1.1", "op": 2}),
-            dict(kind="arp", src=rmac(), extra={"ip": "192.168.1.1", "op": 2})]
+    return [dict(kind="arp", src=rmac(), extra={"ip": GW_IP, "op": 2}),
+            dict(kind="arp", src=rmac(), extra={"ip": GW_IP, "op": 2})]
 
 
 def dns():
-    return [dict(kind="dns", src="192.168.1.1",
+    return [dict(kind="dns", src=GW_IP,
                  extra={"qname": f"x{random.randint(1000, 9999)}.example.com", "answers": ["192.168.1.99"]})]
 
 
