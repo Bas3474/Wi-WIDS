@@ -124,36 +124,46 @@ class NetSniffer(_Capture):
         super().__init__(iface, engine, net_to_event, bpf="arp or udp port 53")
 
 
-class SerialSniffer(threading.Thread):
-    """อ่านข้อมูลจาก ESP32 Sniffer ผ่านสาย USB Serial โดยตรง (ทั้ง Windows COMx และ Linux ttyUSBx/ttyACMx)"""
-    daemon = True
-
-    def __init__(self, port_cfg: str, baud: int, engine, on_sensor=None):
-        super().__init__(name="serial-sniffer")
-        self.port_cfg = (port_cfg or "auto").strip()
-        self.baud = int(baud or 115200)
+class SerialWorker(threading.Thread):
+    """Worker ประจำแต่ละพอร์ต USB ที่เสียบ ESP32 (แยก Thread อิสระ)"""
+    def __init__(self, port: str, baud: int, engine, on_sensor=None):
+        super().__init__(name=f"serial-worker-{port}", daemon=True)
+        self.port = port
+        self.baud = baud
         self.engine = engine
         self.on_sensor = on_sensor
         self._stop_evt = threading.Event()
+        self.sensor_name = f"esp32 ({port})"
 
     def stop(self):
         self._stop_evt.set()
 
-    def _find_port(self) -> Optional[str]:
-        import serial.tools.list_ports
-        if self.port_cfg and self.port_cfg.lower() != "auto":
-            return self.port_cfg
-        for p in serial.tools.list_ports.comports():
-            dev = p.device or ""
-            desc = (p.description or "").lower()
-            if (p.vid is not None or "usb" in dev.lower() or "acm" in dev.lower()
-                    or any(k in desc for k in ("cp210", "ch340", "ch910", "uart", "jtag", "esp", "serial"))):
-                if dev.startswith("/dev/ttyS"):
-                    continue
-                return dev
-        return None
+    def run(self):
+        import serial
+        log.info("🔌 [PLUGIN] เชื่อมต่อ ESP32 ที่พอร์ต %s (%d baud)...", self.port, self.baud)
+        try:
+            with serial.Serial(self.port, self.baud, timeout=1.0) as ser:
+                print(f"🔌 [PLUGIN] เชื่อมต่อ ESP32 สำเร็จ! พอร์ต: {self.port}")
+                if self.on_sensor:
+                    self.on_sensor(self.sensor_name, 0, online=True)
+                while not self._stop_evt.is_set():
+                    raw_bytes = ser.readline()
+                    if not raw_bytes:
+                        continue
+                    line = raw_bytes.decode("utf-8", errors="ignore").strip()
+                    if line:
+                        try:
+                            self._process_line(line)
+                        except Exception:
+                            pass
+        except Exception as e:
+            log.warning("🔌 [PLUGIN] พอร์ต %s หลุดการเชื่อมต่อ: %s", self.port, e)
+        finally:
+            if self.on_sensor:
+                self.on_sensor(self.sensor_name, 0, online=False)
+            print(f"🔌 [PLUGIN] สิ้นสุดการเชื่อมต่อพอร์ต {self.port}")
 
-    def _process_line(self, line: str, port: str) -> None:
+    def _process_line(self, line: str) -> None:
         import json
         import time
         from detectors import KINDS
@@ -164,7 +174,8 @@ class SerialSniffer(threading.Thread):
         else:
             return
         data = json.loads(raw)
-        sensor = data.get("sensor", "esp32-usb")
+        sensor = data.get("sensor") or self.sensor_name
+        self.sensor_name = f"{sensor} ({self.port})"
         events = data.get("events", [])
         now = time.time()
         accepted = 0
@@ -179,36 +190,78 @@ class SerialSniffer(threading.Thread):
                 source=f"sensor:{sensor}",
             )
             accepted += 1
-        if accepted and self.on_sensor:
-            self.on_sensor(f"{sensor} ({port})", accepted)
+        if self.on_sensor:
+            self.on_sensor(self.sensor_name, accepted, online=True)
+
+
+class ESP32PluginManager(threading.Thread):
+    """
+    ระบบจัดการ ESP32 Hardware Plugins แบบ Plug-and-Play เต็มรูปแบบ:
+    - Auto-Scan: ค้นหาพอร์ต Serial (USB / ACM / COM) อัตโนมัติทุก 1.5 วินาที
+    - Hot-Plug: เสียบสายปุ๊บเชื่อมต่อทันที ถอดสายออกไม่พัง และเสียบกลับเข้ามาใหม่ก็ Reconnect อัตโนมัติ
+    - Multi-Sensor: เสียบ ESP32 หลายตัวพร้อมกันได้โดยไม่ต้องคอนฟิกพอร์ต
+    """
+    daemon = True
+
+    def __init__(self, port_cfg: str, baud: int, engine, on_sensor=None):
+        super().__init__(name="esp32-plugin-manager")
+        self.port_cfg = (port_cfg or "auto").strip()
+        self.baud = int(baud or 115200)
+        self.engine = engine
+        self.on_sensor = on_sensor
+        self._stop_evt = threading.Event()
+        self.workers: dict[str, SerialWorker] = {}
+
+    def stop(self):
+        self._stop_evt.set()
+        for w in list(self.workers.values()):
+            w.stop()
+
+    def _scan_available_ports(self) -> set[str]:
+        import serial.tools.list_ports
+        found = set()
+        if self.port_cfg and self.port_cfg.lower() != "auto":
+            return {self.port_cfg}
+        for p in serial.tools.list_ports.comports():
+            dev = p.device or ""
+            desc = (p.description or "").lower()
+            if dev.startswith("/dev/ttyS"):
+                continue
+            if (p.vid is not None or "usb" in dev.lower() or "acm" in dev.lower()
+                    or any(k in desc for k in ("cp210", "ch340", "ch910", "uart", "jtag", "esp", "serial", "ftdi"))):
+                found.add(dev)
+        return found
 
     def run(self):
         try:
             import serial
         except ImportError:
-            log.warning("ไม่ได้ติดตั้ง pyserial -> ข้ามการอ่าน ESP32 ผ่านสาย USB")
+            log.warning("ไม่ได้ติดตั้ง pyserial -> ข้ามการทำงาน ESP32 Plug & Play")
             return
 
+        print("🔌 [PLUGIN] ระบบ ESP32 Plug & Play Manager เริ่มทำงานแล้ว (กำลังเฝ้าตรวจพอร์ต USB)...")
         while not self._stop_evt.is_set():
-            port = self._find_port()
-            if not port:
-                self._stop_evt.wait(2.0)
-                continue
             try:
-                with serial.Serial(port, self.baud, timeout=1.0) as ser:
-                    print(f"🔌 [USB-SERIAL] เชื่อมต่อ ESP32 ผ่านสายที่พอร์ต {port} ({self.baud} baud) สำเร็จ!")
-                    while not self._stop_evt.is_set():
-                        raw_bytes = ser.readline()
-                        if not raw_bytes:
-                            continue
-                        line = raw_bytes.decode("utf-8", errors="ignore").strip()
-                        if line:
-                            try:
-                                self._process_line(line, port)
-                            except Exception:
-                                pass
+                available = self._scan_available_ports()
             except Exception:
-                self._stop_evt.wait(2.0)
+                available = set()
+
+            # ทำความสะอาด worker ที่หยุดทำงานไปแล้ว
+            dead_ports = [p for p, w in self.workers.items() if not w.is_alive()]
+            for p in dead_ports:
+                del self.workers[p]
+
+            # เริ่ม worker ให้กับพอร์ตใหม่ที่ยังไม่ได้เชื่อมต่อ
+            for port in available:
+                if port not in self.workers:
+                    worker = SerialWorker(port, self.baud, self.engine, self.on_sensor)
+                    self.workers[port] = worker
+                    worker.start()
+
+            self._stop_evt.wait(1.5)
+
+
+SerialSniffer = ESP32PluginManager
 
 
 def start_all(engine, cfg: dict, on_sensor=None) -> list:

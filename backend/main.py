@@ -86,27 +86,32 @@ engine: Optional[Engine] = None
 active_sensors: dict[str, dict] = {}
 
 
-def record_sensor(name: str, accepted: int) -> None:
+def record_sensor(name: str, accepted: int, online: Optional[bool] = None) -> None:
     now = time.time()
     cur = active_sensors.get(name, {"events_total": 0})
+    is_online = online if online is not None else True
     active_sensors[name] = {
         "last_seen": now,
         "events_total": cur["events_total"] + accepted,
         "last_count": accepted,
+        "online": is_online,
     }
-    print(f"📡 [SENSOR] จาก {name}: รับ {accepted} events (รวมสะสม: {active_sensors[name]['events_total']})")
+    if accepted > 0:
+        print(f"📡 [SENSOR] จาก {name}: รับ {accepted} events (รวมสะสม: {active_sensors[name]['events_total']})")
 
 
 async def live_loop() -> None:
     """ส่งสถิติเฟรมต่อวินาทีให้กราฟ และสถานะ sensor ภายนอก"""
+    cfg = load_config()
+    has_laptop = bool(cfg.get("interface") and os.name != "nt")
     while True:
         await asyncio.sleep(1)
         now = time.time()
         s_list = [
-            {"name": k, "online": (now - v["last_seen"]) < 15, "total": v.get("events_total", 0), "last_seen_sec": int(now - v["last_seen"])}
+            {"name": k, "online": v.get("online", (now - v["last_seen"]) < 15), "total": v.get("events_total", 0), "last_seen_sec": int(now - v["last_seen"])}
             for k, v in active_sensors.items()
         ]
-        await hub.broadcast({"type": "frames", "data": engine.pop_frame_counts(), "sensors": s_list})
+        await hub.broadcast({"type": "frames", "data": engine.pop_frame_counts(), "sensors": s_list, "laptop_sniffer": has_laptop})
 
 
 @asynccontextmanager
@@ -151,12 +156,15 @@ def index():
 def status():
     c = db.counts_by_severity()
     now = time.time()
+    cfg = load_config()
+    has_laptop = bool(cfg.get("interface") and os.name != "nt")
     sensors_info = [
-        {"name": k, "online": (now - v["last_seen"]) < 15, "total": v.get("events_total", 0), "last_seen_sec": int(now - v["last_seen"])}
+        {"name": k, "online": v.get("online", (now - v["last_seen"]) < 15), "total": v.get("events_total", 0), "last_seen_sec": int(now - v["last_seen"])}
         for k, v in active_sensors.items()
     ]
     return {"mode": os.getenv("MODE", "mock"), "counts": c, "total": sum(c.values()),
             "line_configured": bool(os.getenv("LINE_CHANNEL_ACCESS_TOKEN")),
+            "laptop_sniffer": has_laptop,
             "sensors": sensors_info}
 
 

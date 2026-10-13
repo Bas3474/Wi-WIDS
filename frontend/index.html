@@ -28,20 +28,20 @@
   <!-- Sensor nodes status bar -->
   <section class="bg-slate-800/90 border border-slate-700/70 rounded-lg px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-sm">
     <div class="flex flex-wrap items-center gap-2">
-      <span class="text-xs text-slate-400 font-semibold uppercase tracking-wider mr-1">Active Sensors:</span>
-      <span class="px-2.5 py-1 rounded bg-slate-700/80 border border-slate-600 flex items-center gap-1.5 text-xs text-slate-200">
+      <span class="text-xs text-slate-400 font-semibold uppercase tracking-wider mr-1">Active Plugins & Sensors:</span>
+      <span v-if="laptopSniffer" class="px-2.5 py-1 rounded bg-slate-700/80 border border-slate-600 flex items-center gap-1.5 text-xs text-slate-200">
         <span class="w-2 h-2 rounded-full" :class="mode === 'live' ? 'bg-emerald-400 animate-pulse' : 'bg-slate-400'"></span>
-        💻 Laptop Sniffer
+        💻 Laptop Monitor
       </span>
       <template v-for="s in sensors" :key="s.name">
-        <span class="px-2.5 py-1 rounded flex items-center gap-1.5 text-xs font-mono"
-              :class="s.online ? 'bg-indigo-900/70 border border-indigo-500/50 text-indigo-200' : 'bg-slate-800 border border-slate-700 text-slate-400'">
-          <span class="w-2 h-2 rounded-full" :class="s.online ? 'bg-emerald-400' : 'bg-red-400'"></span>
-          📡 {{ s.name }} ({{ s.total }} events)
+        <span class="px-2.5 py-1 rounded flex items-center gap-1.5 text-xs font-mono transition-all duration-300"
+              :class="s.online ? 'bg-indigo-900/80 border border-indigo-400 text-indigo-100 shadow-sm shadow-indigo-500/20' : 'bg-slate-800/80 border border-slate-700 text-slate-400'">
+          <span class="w-2 h-2 rounded-full" :class="s.online ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'"></span>
+          🔌 {{ s.name }} ({{ s.total }} events)
         </span>
       </template>
       <span v-if="!sensors.length" class="text-xs text-amber-400/90 italic flex items-center gap-1">
-        ⚠️ ยังไม่มีข้อมูลจาก ESP32 (รอส่งเข้า /api/ingest)
+        🔌 กำลังรอตรวจจับ ESP32 (เสียบสาย USB ใช้งานได้ทันทีแบบ Plug & Play)
       </span>
     </div>
     <div class="text-xs text-slate-400">
@@ -144,7 +144,7 @@ createApp({
   setup() {
     const incidents = ref([]), counts = ref({}), total = ref(0), mode = ref('-');
     const connected = ref(false), muted = ref(false), query = ref(''), selected = ref(null);
-    const sensors = ref([]);
+    const sensors = ref([]), laptopSniffer = ref(false);
     const frames = { Beacon: 0, Probe: 0, Auth: 0, Deauth: 0 };
     let chart, ws, audioCtx;
 
@@ -161,7 +161,7 @@ createApp({
 
     function formatSource(src) {
       if (!src || src === 'live') return '💻 Laptop';
-      if (src.startsWith('sensor:')) return '📡 ' + src.replace('sensor:', '');
+      if (src.startsWith('sensor:')) return '🔌 ' + src.replace('sensor:', '');
       if (src === 'mock') return '🧪 Mock';
       return src;
     }
@@ -186,6 +186,7 @@ createApp({
       const s = await (await fetch('/api/status')).json();
       counts.value = s.counts; total.value = s.total; mode.value = s.mode;
       if (s.sensors) sensors.value = s.sensors;
+      if (s.laptop_sniffer !== undefined) laptopSniffer.value = s.laptop_sniffer;
     }
     async function loadIncidents() {
       incidents.value = await (await fetch('/api/incidents?q=' + encodeURIComponent(query.value))).json();
@@ -202,6 +203,7 @@ createApp({
           for (const k in m.data) frames[k] += m.data[k];
           chart.data.datasets[0].data = Object.values(frames); chart.update('none');
           if (m.sensors) sensors.value = m.sensors;
+          if (m.laptop_sniffer !== undefined) laptopSniffer.value = m.laptop_sniffer;
         } else if (m.type === 'incident') {
           if (!query.value) incidents.value.unshift(m.data);
           counts.value[m.data.severity] = (counts.value[m.data.severity] || 0) + 1;

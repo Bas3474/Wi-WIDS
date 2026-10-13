@@ -158,10 +158,16 @@ static void connectWifi() {
 }
 #endif
 
+static char actualSensorName[32] = SENSOR_NAME;
+
 void setup() {
   Serial.begin(115200);
   evQueue = xQueueCreate(250, sizeof(Ev));
   WiFi.mode(WIFI_STA);
+
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  snprintf(actualSensorName, sizeof(actualSensorName), "esp32-%02X%02X", mac[4], mac[5]);
 
   wifi_promiscuous_filter_t filt = {
     .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA
@@ -175,7 +181,7 @@ void setup() {
   if (numChannels > 0) {
     esp_wifi_set_channel(hopChannels[0], WIFI_SECOND_CHAN_NONE);
   }
-  Serial.println("USB Serial Sniffer started (Promiscuous + Channel Hopping)");
+  Serial.printf("USB Serial Sniffer [%s] started (Promiscuous + Channel Hopping)\n", actualSensorName);
 #else
   connectWifi();
 #endif
@@ -206,14 +212,26 @@ void loop() {
   if (WiFi.status() != WL_CONNECTED) { connectWifi(); return; }
 #endif
 
-  String body = "{\"sensor\":\"" SENSOR_NAME "\",\"events\":[";
+  String body = "{\"sensor\":\"";
+  body += actualSensorName;
+  body += "\",\"events\":[";
   Ev e;
   int n = 0;
   while (n < 100 && xQueueReceive(evQueue, &e, 0) == pdTRUE) {
     if (n++) body += ",";
     appendEvent(body, e);
   }
-  if (n == 0) return;
+  if (n == 0) {
+#if USE_USB_SERIAL
+    // ส่ง Heartbeat ทุก 3 วินาทีเพื่อให้ Backend ทราบว่า ESP32 กำลังดักฟังอยู่
+    static uint32_t lastHb = 0;
+    if (now - lastHb >= 3000) {
+      lastHb = now;
+      Serial.printf("WIDS_JSON:{\"sensor\":\"%s\",\"events\":[],\"heartbeat\":true,\"uptime\":%u}\n", actualSensorName, (unsigned int)(now / 1000));
+    }
+#endif
+    return;
+  }
   body += "]}";
 
   // ส่งผ่านสาย USB Serial เสมอ (Backend อ่านบรรทัดที่ขึ้นต้นด้วย WIDS_JSON:)
