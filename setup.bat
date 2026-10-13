@@ -3,111 +3,130 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 
 :: ==============================================================================
-:: Wi-Fi Micro-WIDS: Windows Setup & Static IP Lock Script (No Monitor Mode)
-:: วิธีใช้: คลิกขวา Run as Administrator (หรือดับเบิลคลิก ระบบจะขอสิทธิ์ Admin อัตโนมัติ)
+:: Wi-Fi Micro-WIDS: Windows Setup Script (Plug & Play - No Monitor Mode Required)
 :: ==============================================================================
 
-:: ตรวจสอบสิทธิ์ Administrator หากยังไม่มีให้ขอสิทธิ์อัตโนมัติ
+:: 1. ตรวจสอบสิทธิ์ Administrator (จำเป็นสำหรับการเปิด Firewall พอร์ต 8000)
 net session >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [INFO] กำลังขอสิทธิ์ Administrator เพื่อตั้งค่า IP และ Firewall...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    echo [INFO] กำลังขอสิทธิ์ Administrator เพื่อตั้งค่าระบบและ Firewall...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process cmd -ArgumentList '/c \"\"%~f0\"\"' -Verb RunAs"
     exit /b
 )
 
 cd /d "%~dp0"
+title Wi-Fi Micro-WIDS Installer
 
-set "HOTSPOT_SSID=Yes_Yes_Yes"
-set "HOTSPOT_PASS=thecoachofdream"
-set "STATIC_IP=10.77.167.200"
-set "SUBNET_MASK=255.255.255.0"
-set "DEFAULT_GW=10.77.167.1"
 set "PORT=8000"
 
 echo ============================================================
-echo [1/5] ตรวจสอบ Python และสร้าง Virtual Environment (venv)...
+echo   Wi-Fi Micro-WIDS: Windows Setup (Plug ^& Play Architecture)
 echo ============================================================
-where python >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ERROR] ไม่พบ Python ในระบบ กรุณาติดตั้ง Python 3.10+ จาก python.org
-    echo         ^(อย่าลืมติ๊ก "Add python.exe to PATH" ตอนติดตั้ง^)
-    pause
-    exit /b 1
-)
-
-if not exist "venv\Scripts\python.exe" (
-    echo กำลังสร้าง Virtual Environment...
-    python -m venv venv
-)
-
-echo ============================================================
-echo [2/5] ติดตั้ง Python Packages ที่ต้องใช้ทั้งหมด...
-echo ============================================================
-"venv\Scripts\python.exe" -m pip install --upgrade pip -q
-"venv\Scripts\python.exe" -m pip install -r "backend\requirements.txt" -q
-echo [OK] ติดตั้ง FastAPI, Uvicorn, Pydantic, HTTPX, Scapy เรียบร้อย
-
 echo.
-echo ============================================================
-echo [3/5] ตรวจสอบไฟล์ตั้งค่า (.env และ Firmware config.h)...
-echo ============================================================
+
+:: 2. ตรวจสอบ Python ที่ใช้งานได้จริง (ตรวจทั้ง python, py, python3 และเช็คว่าไม่ใช่ Microsoft Store dummy)
+echo [1/4] ตรวจสอบ Python ในเครื่อง...
+set "PY_CMD="
+
+:: ตรวจสอบ py launcher
+py -3 --version >nul 2>&1
+if %errorlevel% equ 0 (
+    set "PY_CMD=py -3"
+    goto :python_found
+)
+
+:: ตรวจสอบ python.exe
+python --version >nul 2>&1
+if %errorlevel% equ 0 (
+    :: ตรวจสอบว่าไม่ใช่ Windows Store alias ที่เปิด Store
+    python -c "import sys; print(sys.version)" >nul 2>&1
+    if !errorlevel! equ 0 (
+        set "PY_CMD=python"
+        goto :python_found
+    )
+)
+
+:: ตรวจสอบ python3
+python3 --version >nul 2>&1
+if %errorlevel% equ 0 (
+    set "PY_CMD=python3"
+    goto :python_found
+)
+
+:python_not_found
+echo.
+echo [ERROR] ไม่พบ Python ที่พร้อมใช้งานในระบบ!
+echo ------------------------------------------------------------
+echo  วิธีแก้ไข:
+echo  1. ดาวน์โหลด Python 3.10+ จาก https://www.python.org/downloads/
+echo  2. ตอนติดตั้ง *สำคัญมาก*: ให้ติ๊กถูกที่ [x] "Add python.exe to PATH"
+echo  3. หากเคยติดตั้งแล้ว ให้ปิด "App execution aliases" ของ Python ใน Windows Settings
+echo ------------------------------------------------------------
+pause
+exit /b 1
+
+:python_found
+echo [OK] พบ Python: !PY_CMD!
+!PY_CMD! --version
+
+:: 3. สร้าง Virtual Environment (venv)
+echo.
+echo [2/4] ตรวจสอบ Virtual Environment (venv)...
+if not exist "venv\Scripts\python.exe" (
+    echo กำลังสร้าง venv ใหม่...
+    !PY_CMD! -m venv venv
+    if not exist "venv\Scripts\python.exe" (
+        echo [ERROR] สร้าง venv ไม่สำเร็จ กรุณาตรวจสอบสิทธิ์การเขียนโฟลเดอร์
+        pause
+        exit /b 1
+    )
+    echo [OK] สร้าง Virtual Environment สำเร็จ
+) else (
+    echo [OK] พบ Virtual Environment เดิมอยู่แล้ว
+)
+
+:: 4. ติดตั้ง Packages
+echo.
+echo [3/4] ติดตั้ง Packages ที่จำเป็นสำหรับ WIDS...
+"venv\Scripts\python.exe" -m pip install --upgrade pip
+"venv\Scripts\python.exe" -m pip install -r "backend\requirements.txt"
+if %errorlevel% neq 0 (
+    echo [WARN] การติดตั้ง package บางตัวอาจมีปัญหา กำลังลองติดตั้งแพ็กเกจหลัก...
+    "venv\Scripts\python.exe" -m pip install fastapi uvicorn pydantic httpx pyserial esptool
+)
+echo [OK] ติดตั้ง Python Packages เรียบร้อย
+
+:: 5. คัดลอกไฟล์ตั้งค่าเริ่มต้น (ถ้ายังไม่มี)
 if not exist "configs\.env" (
     copy /y "configs\.env.example" "configs\.env" >nul
-    echo [OK] สร้าง configs\.env เรียบร้อย
-) else (
-    echo [INFO] พบ configs\.env อยู่แล้ว
+    echo [OK] สร้าง configs\.env
 )
-
 if not exist "firmware\src\sniffer\config.h" (
     copy /y "firmware\src\sniffer\config.example.h" "firmware\src\sniffer\config.h" >nul
-    echo [OK] สร้าง firmware\src\sniffer\config.h เรียบร้อย
+    echo [OK] สร้าง firmware\src\sniffer\config.h
 )
 if not exist "firmware\src\netwatch\config.h" (
     copy /y "firmware\src\netwatch\config.example.h" "firmware\src\netwatch\config.h" >nul
-    echo [OK] สร้าง firmware\src\netwatch\config.h เรียบร้อย
+    echo [OK] สร้าง firmware\src\netwatch\config.h
 )
 
+:: 6. เปิด Windows Firewall พอร์ต 8000
 echo.
-echo ============================================================
-echo [4/5] เชื่อมต่อ Hotspot "%HOTSPOT_SSID%" และล็อก IP %STATIC_IP%...
-echo ============================================================
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ssid = '%HOTSPOT_SSID%'; $pass = '%HOTSPOT_PASS%'; $ip = '%STATIC_IP%'; $mask = '%SUBNET_MASK%'; $defGw = '%DEFAULT_GW%'; " ^
-  "$xml = '<?xml version=\"1.0\"?><WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\"><name>' + $ssid + '</name><SSIDConfig><SSID><name>' + $ssid + '</name></SSID></SSIDConfig><connectionType>ESS</connectionType><connectionMode>auto</connectionMode><MSM><security><authEncryption><authentication>WPA2PSK</authentication><encryption>AES</encryption><useOneX>false</useOneX></authEncryption><sharedKey><keyType>passPhrase</keyType><protected>false</protected><keyMaterial>' + $pass + '</keyMaterial></sharedKey></security></MSM></WLANProfile>'; " ^
-  "$tmp = Join-Path $env:TEMP 'wids_wlan.xml'; $xml | Set-Content -Path $tmp -Encoding UTF8; " ^
-  "netsh wlan add profile filename=\"$tmp\" user=all | Out-Null; Remove-Item $tmp -Force -ErrorAction SilentlyContinue; " ^
-  "netsh wlan connect name=\"$ssid\" ssid=\"$ssid\" | Out-Null; Start-Sleep -Seconds 3; " ^
-  "$adapter = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and ($_.InterfaceDescription -match 'Wireless|Wi-Fi|802\.11|WLAN' -or $_.Name -match 'Wi-Fi|WLAN') } | Select-Object -First 1; " ^
-  "if (-not $adapter) { $adapter = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match 'Wireless|Wi-Fi|802\.11|WLAN' -or $_.Name -match 'Wi-Fi|WLAN' } | Select-Object -First 1 }; " ^
-  "if ($adapter) { " ^
-  "  $ifName = $adapter.Name; Write-Host ('[INFO] ตรวจพบการ์ด Wi-Fi: ' + $ifName); " ^
-  "  $gwObj = (Get-NetIPConfiguration -InterfaceAlias $ifName -ErrorAction SilentlyContinue).IPv4DefaultGateway; " ^
-  "  $gw = if ($gwObj -and $gwObj.NextHop) { $gwObj.NextHop } else { $defGw }; " ^
-  "  Write-Host ('[INFO] ใช้ Gateway: ' + $gw + ' และล็อก IP: ' + $ip); " ^
-  "  netsh interface ipv4 set address name=\"$ifName\" static $ip $mask $gw 1 | Out-Null; " ^
-  "  netsh interface ipv4 set dns name=\"$ifName\" static $gw primary | Out-Null; " ^
-  "  netsh interface ipv4 add dns name=\"$ifName\" 8.8.8.8 index=2 | Out-Null; " ^
-  "  Write-Host ('[OK] ล็อก IP ' + $ip + ' บน ' + $ifName + ' สำเร็จ!'); " ^
-  "} else { Write-Host '[WARN] ไม่พบการ์ด Wi-Fi ในเครื่อง กรุณาตรวจสอบอะแดปเตอร์' }"
-
-echo.
-echo ============================================================
-echo [5/5] เปิด Windows Firewall พอร์ต %PORT% (สำหรับ ESP32 และมือถือ)...
-echo ============================================================
+echo [4/4] ตั้งค่า Windows Firewall อนุญาตพอร์ต %PORT%/TCP...
 netsh advfirewall firewall delete rule name="Wi-Fi Micro-WIDS Port %PORT%" >nul 2>&1
 netsh advfirewall firewall add rule name="Wi-Fi Micro-WIDS Port %PORT%" dir=in action=allow protocol=TCP localport=%PORT% profile=any >nul
-echo [OK] เปิดพอร์ต %PORT%/TCP บน Windows Firewall ทุกโปรไฟล์ (Public/Private) เรียบร้อย
+echo [OK] เปิดพอร์ต %PORT%/TCP บน Windows Firewall เรียบร้อย
 
 echo.
 echo ============================================================
-echo ตั้งค่าระบบบน Windows เสร็จสมบูรณ์!
+echo   ติดตั้งระบบสำหรับ Windows เสร็จสมบูรณ์แล้ว!
 echo ============================================================
-echo  Hotspot SSID     : %HOTSPOT_SSID%
-echo  Locked Server IP : %STATIC_IP%
-echo  Dashboard URL    : http://%STATIC_IP%:%PORT%
-echo  ESP32 Ingest URL : http://%STATIC_IP%:%PORT%/api/ingest
+echo  สถาปัตยกรรม : ESP32 Plug ^& Play (ไม่ต้องใช้ Monitor Mode)
+echo  วิธีใช้งาน  :
+echo    1. เสียบสาย USB ESP32 เข้าคอมพิวเตอร์
+echo    2. แฟลชบอร์ด (ครั้งแรก): ดับเบิลคลิก flash_esp32.bat
+echo    3. รันระบบ WIDS        : ดับเบิลคลิก run.bat
+echo    4. เปิดดู Dashboard    : http://localhost:%PORT%
+echo ============================================================
 echo.
-echo  วิธีรันเซิร์ฟเวอร์: ดับเบิลคลิกไฟล์ run.bat หรือรันคำสั่ง:
-echo     venv\Scripts\python.exe backend\main.py
-echo ============================================================
 pause

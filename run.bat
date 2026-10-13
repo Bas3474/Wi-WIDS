@@ -1,19 +1,29 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
+title Wi-Fi Micro-WIDS Server
 
 if not exist "venv\Scripts\python.exe" (
-    echo [WARN] ยังไม่ได้ติดตั้งสภาพแวดล้อม กำลังรัน setup.bat ก่อน...
+    echo [WARN] ยังไม่ได้ติดตั้งระบบ กำลังรัน setup.bat อัตโนมัติ...
     call setup.bat
 )
 
 echo ============================================================
-echo กำลังเปิด Wi-Fi Micro-WIDS Server...
-echo  - หน้าเว็บบนเครื่องนี้ : http://localhost:8000
-echo  - หน้าเว็บบนมือถือ   : http://10.77.167.200:8000
-echo  - รับข้อมูล ESP32   : http://10.77.167.200:8000/api/ingest
-echo  (กด Ctrl+C เพื่อหยุดการทำงาน)
+echo   กำลังเริ่มต้น Wi-Fi Micro-WIDS Server...
 echo ============================================================
+echo  - หน้าเว็บ Dashboard : http://localhost:8000
+echo  - เซนเซอร์ ESP32     : เชื่อมต่อผ่านสาย USB Plug ^& Play
+echo                         (เสียบสายแล้วระบบจะรับข้อมูลทันที)
+echo.
+echo  กด Ctrl+C เพื่อหยุดการทำงานของเซิร์ฟเวอร์
+echo ============================================================
+echo.
+
+:: เปิด Browser อัตโนมัติหลังจากรอ 1.5 วินาที
 start "" "http://localhost:8000"
+
 "venv\Scripts\python.exe" "backend\main.py"
+
+echo.
+echo [INFO] เซิร์ฟเวอร์หยุดทำงานแล้ว
 pause

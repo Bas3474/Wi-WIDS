@@ -27,7 +27,7 @@
   "thresholds": {
     "deauth": {
       "window": 5.0,
-      "threshold": 20
+      "threshold": 10
     },
     "recon": {
       "window": 10.0,

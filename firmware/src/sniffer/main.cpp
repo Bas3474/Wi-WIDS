@@ -89,7 +89,7 @@ static void onPacket(void* buf, wifi_promiscuous_pkt_type_t type) {
   memcpy(e.src, d + 10, 6);
   memcpy(e.bssid, d + 16, 6);
 
-  if (type == WIFI_PKT_MGMT) {
+  if (type == WIFI_PKT_MGMT || ftype == 0) {
     switch (sub) {
       case 0xC: case 0xA: e.kind = K_DEAUTH; break;        // deauth / disassoc
       case 0x8:                                            // beacon

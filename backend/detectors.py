@@ -92,9 +92,9 @@ def _gc(table: dict, ts: float, window: float, limit: int = 5000) -> None:
 
 
 class DeauthDetector(Detector):
-    """1. Deauth/Disassoc ต่อ (src, bssid) เกิน threshold ใน window วินาที"""
+    """1. Deauth/Disassoc flood detector รองรับทั้งการโจมตีแบบ 2-way spoofing, broadcast, และ randomized MAC"""
 
-    def __init__(self, window=5.0, threshold=20, cooldown=None):
+    def __init__(self, window=5.0, threshold=10, cooldown=None):
         super().__init__(cooldown)
         self.window, self.threshold = window, threshold
         self.win: dict = defaultdict(deque)
@@ -102,17 +102,30 @@ class DeauthDetector(Detector):
     def feed(self, ev):
         if ev.kind != "deauth":
             return []
-        key = (norm_mac(ev.src), norm_mac(ev.bssid))
+        src = norm_mac(ev.src)
+        bssid = norm_mac(ev.bssid)
+        dst = norm_mac(ev.dst)
+
+        # ใช้ target BSSID เป็นหลัก (หากไม่มีให้ใช้ src/dst)
+        # เพื่อรวมเฟรม Deauth ทั้ง AP->Client และ Client->AP รวมถึงกรณี Attacker สุ่ม MAC
+        target = bssid if (bssid and bssid != BROADCAST) else (src or dst)
+        key = target
+        if not key:
+            return []
+
         q = self.win[key]
-        q.append((ev.ts, norm_mac(ev.dst), ev.rssi, ev.channel))
+        q.append((ev.ts, dst, ev.rssi, ev.channel, src))
         _slide(q, ev.ts, self.window)
         _gc(self.win, ev.ts, self.window)
+
         if len(q) < self.threshold or not self._ready(key, ev.ts):
             return []
-        victims = {d for _, d, _, _ in q if d != BROADCAST}
-        bcast = any(d == BROADCAST for _, d, _, _ in q)
+
+        victims = {d for _, d, _, _, _ in q if d != BROADCAST}
+        bcast = any(d == BROADCAST for _, d, _, _, _ in q)
+        primary_src = src or (q[-1][4] if q else "")
         return [Detection(
-            DEAUTH, CRITICAL, L2, key[0], key[1], ev.ssid,
+            DEAUTH, CRITICAL, L2, primary_src, bssid or key, ev.ssid,
             max(len(victims), 1 if bcast else 0), ev.channel, ev.rssi,
             round(len(q) / self.window, 1),
             "Client ถูกตัดการเชื่อมต่อซ้ำ ๆ" + (" (broadcast ทั้ง BSS)" if bcast else ""),

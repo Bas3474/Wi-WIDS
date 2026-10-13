@@ -65,11 +65,21 @@ def send(url, token, name, events):
         print(f"{name:10s} -> {len(events):3d} events sent, server: {r.read().decode()}")
 
 
-if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("scenario", choices=[*SCENARIOS, "all"])
     ap.add_argument("--url", default="http://localhost:8000")
     ap.add_argument("--token", default="")
     a = ap.parse_args()
+
+    token = a.token
+    if not token:
+        from pathlib import Path
+        env_file = Path(__file__).resolve().parent.parent / "configs" / ".env"
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                if line.startswith("DASHBOARD_TOKEN="):
+                    token = line.split("=", 1)[1].strip()
+                    break
+
     for n in (SCENARIOS if a.scenario == "all" else [a.scenario]):
-        send(a.url, a.token, n, SCENARIOS[n]())
+        send(a.url, token, n, SCENARIOS[n]())

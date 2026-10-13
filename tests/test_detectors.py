@@ -30,6 +30,21 @@ class TestDeauth(unittest.TestCase):
         ev = [Event("deauth", i * 2.0, ATK, "11:22:33:44:55:66", AP) for i in range(30)]
         self.assertEqual(feed_all(DeauthDetector(), ev), [])
 
+    def test_two_way_spoofing_detected(self):
+        # จำลองการโจมตีแบบ aireplay-ng: 5 เฟรม AP->Client และ 5 เฟรม Client->AP รวมเป็น 10 เฟรม
+        ev = [Event("deauth", i * 0.1, AP, "11:22:33:44:55:66", AP) for i in range(5)]
+        ev += [Event("deauth", 0.5 + i * 0.1, "11:22:33:44:55:66", AP, AP) for i in range(5)]
+        out = feed_all(DeauthDetector(threshold=10), ev)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].attack_type, "Deauth Attack")
+
+    def test_randomized_src_mac_detected(self):
+        # ผู้โจมตีสุ่ม MAC ทุกแพ็กเก็ต แต่ยิงเข้า BSSID เดียวกัน
+        ev = [Event("deauth", i * 0.1, f"00:11:22:33:44:{i:02X}", "FF:FF:FF:FF:FF:FF", AP) for i in range(12)]
+        out = feed_all(DeauthDetector(threshold=10), ev)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].attack_type, "Deauth Attack")
+
 
 class TestEvilTwin(unittest.TestCase):
     prof = [{"ssid": "Campus", "bssids": [AP], "channels": [6]}]
