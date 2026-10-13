@@ -95,7 +95,7 @@ def beacon_flood():
 
 
 SCENARIOS = {"deauth": deauth, "auth_dos": auth_dos, "beacon_flood": beacon_flood,
-             "evil_twin": evil_twin, "recon": recon, "wpa": wpa, "mitm": mitm, "dns": dns}
+             "evil_twin": evil_twin, "recon": recon, "wpa": wpa}
 
 
 def send(url, token, name, events):

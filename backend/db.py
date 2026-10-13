@@ -15,7 +15,7 @@ COLUMNS = [
 
 @contextmanager
 def _conn() -> Generator[sqlite3.Connection, None, None]:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -26,6 +26,8 @@ def _conn() -> Generator[sqlite3.Connection, None, None]:
 def init_db() -> None:
     with _conn() as c:
         with c:
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA synchronous=NORMAL")
             c.execute(
                 """CREATE TABLE IF NOT EXISTS incidents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,6 +36,8 @@ def init_db() -> None:
                     channel INTEGER, rssi INTEGER, frame_rate REAL,
                     impact TEXT, action TEXT, source TEXT)"""
             )
+            c.execute("CREATE INDEX IF NOT EXISTS idx_incidents_ts ON incidents(timestamp DESC)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_incidents_type ON incidents(attack_type)")
 
 
 def insert_incident(inc: Incident) -> Incident:

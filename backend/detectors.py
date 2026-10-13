@@ -24,8 +24,8 @@ BEACON_FLOOD = "Beacon Flood / AP Anomaly"
 CRITICAL, SUSPICIOUS = "Critical", "Suspicious"
 L2, L3, DNS = "802.11", "ARP/IP", "DNS"
 
-# kind ของ Event ที่ระบบรู้จัก (sensor ภายนอกอย่าง ESP32 ก็ใช้ชุดเดียวกัน)
-KINDS = {"deauth", "beacon", "probe_req", "auth", "eapol", "arp", "dns"}
+# kind ของ Event ที่ระบบรู้จัก (เน้น 802.11 Layer 2 ล้วน ๆ)
+KINDS = {"deauth", "beacon", "probe_req", "auth", "eapol"}
 
 
 @dataclass
@@ -140,9 +140,12 @@ class AuthDosDetector(Detector):
     เพื่อทำให้ตาราง Client / Authentication State ของ AP ล้น จน Client อื่นเชื่อมต่อไม่ได้
     """
 
-    def __init__(self, window=5.0, threshold=15, cooldown=None):
+    def __init__(self, window=5.0, threshold=35, min_sources=5, single_source_threshold: int | None = None, cooldown=45.0):
         super().__init__(cooldown)
-        self.window, self.threshold = window, threshold
+        self.window = float(window)
+        self.threshold = int(threshold)
+        self.min_sources = int(min_sources)
+        self.single_source_threshold = int(single_source_threshold) if single_source_threshold is not None else int(self.threshold * 1.5)
         self.win: dict = defaultdict(deque)
 
     def feed(self, ev):
@@ -162,16 +165,31 @@ class AuthDosDetector(Detector):
         _slide(q, ev.ts, self.window)
         _gc(self.win, ev.ts, self.window)
 
-        if len(q) < self.threshold or not self._ready(target, ev.ts):
+        if len(q) < self.threshold:
             return []
 
         sources = {s for _, s, _, _ in q if s and s != BROADCAST}
         rate = round(len(q) / self.window, 1)
+
+        # แยกแยะการโจมตีจริงออกจากอุปกรณ์ปกติที่พยายามเชื่อมต่อ/สัญญาณอ่อน:
+        # 1. Multi-source Flood: สุ่ม MAC ปลอมแปลงหลายตัว (ลักษณะเฉพาะของ mdk3/mdk4) และเฟรมรวม >= threshold
+        # 2. Single-source Extreme Flood: MAC น้อยตัวแต่ยิงเฟรมถล่มหนักมาก (>= single_source_threshold)
+        is_multi_source_flood = (len(sources) >= self.min_sources) and (len(q) >= self.threshold)
+        is_single_source_flood = len(q) >= self.single_source_threshold
+
+        if not (is_multi_source_flood or is_single_source_flood):
+            return []
+
+        if not self._ready(target, ev.ts):
+            return []
+
         primary_src = src or (q[-1][1] if q else "")
         if len(sources) > 3:
-            impact = f"พบการยิง Authentication Flood (Auth DoS) ถล่ม AP ({len(sources)} MAC ปลอมแปลง, {rate} เฟรม/วิ) เสี่ยงทำให้ AP หน่วยความจำเต็ม/ค้าง"
+            impact = (f"พบการยิง Authentication Flood (Auth DoS) ถล่ม AP ({len(sources)} MAC ปลอมแปลง, "
+                      f"{len(q)} คำขอใน {self.window} วิ, {rate} เฟรม/วิ) เสี่ยงทำให้ AP หน่วยความจำเต็ม/ค้าง")
         else:
-            impact = f"พบการส่ง Authentication Request ถี่ผิดปกติ ({len(q)} ครั้ง ใน {self.window} วินาที, {rate} เฟรม/วิ) ไปยัง AP"
+            impact = (f"พบการส่ง Authentication Request ถี่ผิดปกติอย่างรุนแรง ({len(q)} ครั้ง "
+                      f"ใน {self.window} วิ, {rate} เฟรม/วิ) ไปยัง AP")
 
         return [Detection(
             AUTH_DOS, CRITICAL, L2, primary_src, target, ev.ssid,
@@ -180,109 +198,25 @@ class AuthDosDetector(Detector):
             "เปิดใช้งาน 802.11w (PMF / Management Frame Protection), ตั้งค่า Rate Limiting บน AP, ตรวจหาพิกัดสัญญาณผู้โจมตี")]
 
 
-class EvilTwinDetector(Detector):
-    """2. ตรวจจับ Evil Twin / Rogue AP (ตรงตามฟังก์ชัน Evil Twin ของ airgeddon)
-    - ตรวจจับตาม Profile (config.json): BSSID ไม่อยู่ในรายการที่อนุญาต หรือช่องสัญญาณไม่ตรง
-    - ตรวจจับแบบ Dynamic อัตโนมัติ: หากพบ BSSID ใหม่ปล่อย SSID ซ้ำกับ AP เดิมที่เคยตรวจพบ
-    """
-
-    def __init__(self, profiles: list[dict], cooldown=None):
-        super().__init__(cooldown)
-        self.profiles = {p["ssid"]: p for p in profiles}
-        self.seen_ssids: dict[str, set[str]] = defaultdict(set)
-        self.last_deauth: dict[str, float] = {}
-
-    def reload_profiles(self, profiles: list[dict]) -> None:
-        """อัปเดตโปรไฟล์เครือข่ายที่อนุญาตแบบเรียลไทม์ (เมื่อผู้ใช้กดระบุ Wi-Fi หอพัก/มหาลัย)"""
-        self.profiles = {p["ssid"]: p for p in profiles}
-
-    def feed(self, ev):
-        if ev.kind == "deauth":
-            bssid = norm_mac(ev.bssid)
-            if bssid:
-                self.last_deauth[bssid] = ev.ts
-            if ev.ssid:
-                self.last_deauth[f"ssid_{ev.ssid}"] = ev.ts
-            return []
-        if ev.kind != "beacon":
-            return []
-        ssid = (ev.ssid or "").strip()
-        if not ssid:
-            return []
-        bssid = norm_mac(ev.bssid or ev.src)
-        if not bssid:
-            return []
-
-        # 1. ตรวจสอบตาม Profile ที่กำหนดใน config.json
-        prof = self.profiles.get(ssid)
-        if prof:
-            allowed = {norm_mac(b) for b in prof.get("bssids", [])}
-            chans = prof.get("channels", [])
-            is_dorm = bool(prof.get("is_dorm_campus", False))
-
-            # เช็คว่ามี Deauth เกิดขึ้นกับ AP ใดๆ ในเครือข่ายนี้หรือไม่
-            has_recent_deauth = any(
-                ev.ts - self.last_deauth.get(b, float("-inf")) < 60
-                for b in (allowed or self.seen_ssids[ssid])
-            ) or (ev.ts - self.last_deauth.get(f"ssid_{ssid}", float("-inf")) < 60)
-
-            bad_bssid = bool(allowed) and (bssid not in allowed)
-            bad_chan = bool(chans) and ev.channel and (ev.channel not in chans)
-            if is_dorm:
-                # ในเครือข่ายหอพัก/มหาวิทยาลัย อนุญาตให้กระจายช่องสัญญาณได้ (Multi-AP Roaming)
-                bad_chan = False
-
-            if bad_bssid or bad_chan:
-                if self._ready(f"{ssid}_{bssid}", ev.ts):
-                    why = "BSSID แปลกปลอม ไม่อยู่ใน profile" if bad_bssid else f"อยู่ช่อง {ev.channel} ผิดจาก profile"
-                    tag = " (เครือข่ายหอ/มหาลัย)" if is_dorm else ""
-                    msg = f"พบ Evil Twin (airgeddon Rogue AP) ใช้ SSID '{ssid}' ({why}){tag}"
-                    if has_recent_deauth:
-                        msg += " ร่วมกับการยิง Deauth ตัดสัญญาณ AP จริง (airgeddon Attack Pattern)"
-                    return [Detection(
-                        EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 0, ev.channel, ev.rssi, 0.0,
-                        msg,
-                        "แจ้งเตือนผู้ใช้ห้ามเชื่อมต่อเด็ดขาด, ตรวจสอบตำแหน่ง AP ปลอม")]
-                return []
-
-            if allowed or is_dorm:
-                self.seen_ssids[ssid].add(bssid)
-                return []
-
-        # 2. ตรวจสอบแบบ Dynamic: หาก SSID เดียวกันถูกปล่อยจาก BSSID ใหม่ที่ไม่เคยพบ
-        known = self.seen_ssids[ssid]
-        if known and bssid not in known:
-            # มี Deauth เกิดขึ้นกับ AP เดิมหรือไม่ (พฤติกรรมเฉพาะของ airgeddon Captive Portal)
-            has_recent_deauth = any(
-                ev.ts - self.last_deauth.get(old_b, float("-inf")) < 60
-                for old_b in known
-            ) or (ev.ts - self.last_deauth.get(f"ssid_{ssid}", float("-inf")) < 60)
-
-            if self._ready(f"dyn_{ssid}_{bssid}", ev.ts):
-                msg = f"ตรวจพบ AP ที่ 2 ใช้ชื่อ SSID '{ssid}' ซ้ำกับ AP เดิม (BSSID: {bssid})"
-                if has_recent_deauth:
-                    msg += " ร่วมกับการยิง Deauth ตัดสัญญาณ AP จริง (รูปแบบการโจมตี Evil Twin + Captive Portal ของ airgeddon)"
-                else:
-                    msg += " (Rogue AP BSSID แปลกปลอม)"
-                return [Detection(
-                    EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 1, ev.channel, ev.rssi, 0.0,
-                    msg,
-                    "ตัดการเชื่อมต่อทันที, สแกนหาตำแหน่ง BSSID แปลกปลอม")]
-        known.add(bssid)
-        return []
-
-
 class BeaconFloodDetector(Detector):
     """8. ตรวจจับ Beacon Flood Attack และ AP Beacon Anomaly (mdk3/mdk4/ESP8266 Fake AP Spammer)
     - กรณีที่ 1 (Beacon Flood): ตรวจพบ AP/BSSID ปลอมแปลงปริมาณมากผิดปกติถูกประกาศขึ้นมาบนช่องสัญญาณพร้อมๆ กัน
     - กรณีที่ 2 (AP Beacon Anomaly): ตรวจพบ AP ตัวใดตัวหนึ่งส่งเฟรม Beacon ถี่เกินมาตรฐานอย่างรุนแรง แย่งชิง Airtime
     """
+    active_floods: dict[int, float] = {}
 
-    def __init__(self, window=5.0, threshold=25, single_ap_threshold=75, cooldown=None):
+    @classmethod
+    def is_channel_flooded(cls, ch: int, ts: float) -> bool:
+        flood_ts = cls.active_floods.get(ch)
+        if flood_ts is None:
+            return False
+        return 0 <= (ts - flood_ts) < 15.0
+
+    def __init__(self, window=5.0, threshold=20, single_ap_threshold=75, cooldown=20.0):
         super().__init__(cooldown)
-        self.window = window
-        self.threshold = threshold                  # จำนวน unique BSSID ใน window (ค่าเริ่มต้น 25)
-        self.single_ap_threshold = single_ap_threshold  # จำนวน beacon จาก AP เดียวใน window (ค่าเริ่มต้น 75, ปกติ ~10/s)
+        self.window = float(window)
+        self.threshold = int(threshold)                  # จำนวน unique BSSID ใน window (ค่าเริ่มต้น 20)
+        self.single_ap_threshold = int(single_ap_threshold)  # จำนวน beacon จาก AP เดียวใน window (ค่าเริ่มต้น 75, ปกติ ~10/s)
         self.ch_win: dict[int, deque] = defaultdict(deque)     # channel -> deque[(ts, bssid, ssid, rssi)]
         self.ap_win: dict[str, deque] = defaultdict(deque)     # bssid -> deque[(ts, channel, rssi)]
 
@@ -309,6 +243,7 @@ class BeaconFloodDetector(Detector):
         # ตรวจสอบกรณีที่ 1: Beacon Flood (ตรวจพบ Fake APs / BSSIDs จำนวนมากพร้อมกัน)
         unique_bssids = {b for _, b, _, _ in ch_q}
         if len(unique_bssids) >= self.threshold:
+            self.active_floods[ch] = ev.ts
             flood_key = f"bcast_flood_{ch}"
             if self._ready(flood_key, ev.ts):
                 unique_ssids = {s for _, _, s, _ in ch_q if s}
@@ -338,30 +273,167 @@ class BeaconFloodDetector(Detector):
         return []
 
 
-class ReconDetector(Detector):
-    """5. ตรวจจับ Probe Request Flood / Reconnaissance ใน airgeddon"""
+class EvilTwinDetector(Detector):
+    """2. ตรวจจับ Evil Twin / Rogue AP (ตรงตามฟังก์ชัน Evil Twin ของ airgeddon)
+    - ตรวจจับตาม Profile (config.json): BSSID ไม่อยู่ในรายการที่อนุญาต หรือช่องสัญญาณไม่ตรง
+    - ตรวจจับแบบ Dynamic อัตโนมัติ: หากพบ BSSID ใหม่ปล่อย SSID ซ้ำกับ AP เดิมที่เคยตรวจพบ
+    - มีกลไกระงับการแจ้งเตือนซ้ำซ้อนเมื่อเกิด Beacon Flood บนช่องสัญญาณ
+    """
 
-    def __init__(self, window=10.0, threshold=25, cooldown=None):
+    def __init__(self, profiles: list[dict], cooldown=30.0):
         super().__init__(cooldown)
-        self.window, self.threshold = window, threshold
-        self.win: dict = defaultdict(deque)
+        self.profiles = {p["ssid"]: p for p in profiles}
+        self.seen_ssids: dict[str, set[str]] = defaultdict(set)
+        self.last_deauth: dict[str, float] = {}
+        self.first_seen: dict[str, float] = {}
+
+    def reload_profiles(self, profiles: list[dict]) -> None:
+        """อัปเดตโปรไฟล์เครือข่ายที่อนุญาตแบบเรียลไทม์ (เมื่อผู้ใช้กดระบุ Wi-Fi หอพัก/มหาลัย)"""
+        self.profiles = {p["ssid"]: p for p in profiles}
+
+    def feed(self, ev):
+        if ev.kind == "deauth":
+            bssid = norm_mac(ev.bssid)
+            if bssid:
+                self.last_deauth[bssid] = ev.ts
+            if ev.ssid:
+                self.last_deauth[f"ssid_{ev.ssid}"] = ev.ts
+            return []
+        if ev.kind != "beacon":
+            return []
+        ssid = (ev.ssid or "").strip()
+        if not ssid:
+            return []
+        bssid = norm_mac(ev.bssid or ev.src)
+        if not bssid:
+            return []
+
+        # หากช่องสัญญาณนี้กำลังเกิด Beacon Flood อยู่ ให้งดแจ้งเตือนเป็น Evil Twin ซ้ำซ้อน
+        if BeaconFloodDetector.is_channel_flooded(ev.channel or 0, ev.ts):
+            return []
+
+        # 1. ตรวจสอบตาม Profile ที่กำหนดใน config.json
+        prof = self.profiles.get(ssid)
+        if prof:
+            allowed = {norm_mac(b) for b in prof.get("bssids", [])}
+            chans = prof.get("channels", [])
+            is_dorm = bool(prof.get("is_dorm_campus", False))
+
+            has_recent_deauth = any(
+                ev.ts - self.last_deauth.get(b, float("-inf")) < 60
+                for b in (allowed or self.seen_ssids[ssid])
+            ) or (ev.ts - self.last_deauth.get(f"ssid_{ssid}", float("-inf")) < 60)
+
+            bad_bssid = bool(allowed) and (bssid not in allowed)
+            bad_chan = bool(chans) and ev.channel and (ev.channel not in chans)
+            if is_dorm:
+                bad_chan = False
+
+            if bad_bssid or bad_chan:
+                # Cooldown ล็อกตาม SSID ป้องกันแจ้งเตือนรัวเมื่อมีผู้โจมตีปล่อยหลาย BSSID
+                if self._ready(f"prof_{ssid}", ev.ts):
+                    why = "BSSID แปลกปลอม ไม่อยู่ใน profile" if bad_bssid else f"อยู่ช่อง {ev.channel} ผิดจาก profile"
+                    tag = " (เครือข่ายหอ/มหาลัย)" if is_dorm else ""
+                    msg = f"พบ Evil Twin (airgeddon Rogue AP) ใช้ SSID '{ssid}' ({why}){tag}"
+                    if has_recent_deauth:
+                        msg += " ร่วมกับการยิง Deauth ตัดสัญญาณ AP จริง (airgeddon Attack Pattern)"
+                    return [Detection(
+                        EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 0, ev.channel, ev.rssi, 0.0,
+                        msg,
+                        "แจ้งเตือนผู้ใช้ห้ามเชื่อมต่อเด็ดขาด, ตรวจสอบตำแหน่ง AP ปลอม")]
+                return []
+
+            if allowed or is_dorm:
+                self.seen_ssids[ssid].add(bssid)
+                return []
+
+        # 2. ตรวจสอบแบบ Dynamic: หาก SSID เดียวกันถูกปล่อยจาก BSSID ใหม่ที่ไม่เคยพบ
+        if ssid not in self.first_seen:
+            self.first_seen[ssid] = ev.ts
+
+        known = self.seen_ssids[ssid]
+        if known and bssid not in known:
+            # หาก SSID นี้มี BSSID แปลกปลอมโผล่มาเกิน 2 ตัวพร้อมกัน มักเป็น Beacon Flood มากกว่า Evil Twin
+            if len(known) >= 3:
+                known.add(bssid)
+                return []
+
+            has_recent_deauth = any(
+                ev.ts - self.last_deauth.get(old_b, float("-inf")) < 60
+                for old_b in known
+            ) or (ev.ts - self.last_deauth.get(f"ssid_{ssid}", float("-inf")) < 60)
+
+            # หากเพิ่งพบ SSID นี้ในเสี้ยววินาที (< 0.8s) และไม่มี Deauth ร่วมด้วย มักเป็นเศษเสี้ยวของ Beacon Flood burst
+            if (ev.ts - self.first_seen.get(ssid, ev.ts) < 0.8) and not has_recent_deauth:
+                known.add(bssid)
+                return []
+
+            # Cooldown ล็อกตาม SSID (ไม่ล็อกตาม BSSID) ป้องกันการแจ้งเตือนรัวเกิน 1 ครั้งในรอบ Cooldown
+            if self._ready(f"dyn_{ssid}", ev.ts):
+                msg = f"ตรวจพบ AP ที่ 2 ใช้ชื่อ SSID '{ssid}' ซ้ำกับ AP เดิม (BSSID: {bssid})"
+                if has_recent_deauth:
+                    msg += " ร่วมกับการยิง Deauth ตัดสัญญาณ AP จริง (รูปแบบการโจมตี Evil Twin + Captive Portal ของ airgeddon)"
+                else:
+                    msg += " (Rogue AP BSSID แปลกปลอม)"
+                return [Detection(
+                    EVIL_TWIN, CRITICAL, L2, bssid, bssid, ssid, 1, ev.channel, ev.rssi, 0.0,
+                    msg,
+                    "ตัดการเชื่อมต่อทันที, สแกนหาตำแหน่ง BSSID แปลกปลอม")]
+        known.add(bssid)
+        return []
+
+
+class ReconDetector(Detector):
+    """5. ตรวจจับ Probe Request Flood / Reconnaissance ใน airgeddon และ Wi-Fi Scanners"""
+
+    def __init__(self, window=10.0, threshold=10, cooldown=15.0):
+        super().__init__(cooldown)
+        self.window = float(window)
+        self.threshold = int(threshold)
+        self.mac_win: dict[str, deque] = defaultdict(deque)
+        self.ch_win: dict[int, deque] = defaultdict(deque)
 
     def feed(self, ev):
         if ev.kind != "probe_req":
             return []
-        key = norm_mac(ev.src)
-        q = self.win[key]
-        q.append((ev.ts, ev.ssid, ev.rssi, ev.channel))
-        _slide(q, ev.ts, self.window)
-        _gc(self.win, ev.ts, self.window)
-        if len(q) < self.threshold or not self._ready(key, ev.ts):
-            return []
-        ssids = {s for _, s, _, _ in q if s}
-        return [Detection(
-            RECON, SUSPICIOUS, L2, key, "", "", 0, ev.channel, ev.rssi,
-            round(len(q) / self.window, 1),
-            f"สแกนหา AP/Client ถี่ผิดปกติ ({len(ssids)} SSID ที่ต่างกัน)",
-            "เฝ้าระวัง, บันทึก MAC ต้นทาง")]
+        src = norm_mac(ev.src)
+        ch = ev.channel or 0
+
+        # 1. บันทึกระดับ Channel เพื่อตรวจจับ Scanner ที่สุ่ม MAC (MAC Randomization)
+        ch_q = self.ch_win[ch]
+        ch_q.append((ev.ts, src, ev.ssid or "", ev.rssi))
+        _slide(ch_q, ev.ts, self.window)
+        _gc(self.ch_win, ev.ts, self.window)
+
+        # 2. บันทึกระดับ MAC ต้นทาง (สำหรับ Scanner ที่ใช้ MAC เดียว)
+        if src and src != BROADCAST:
+            mac_q = self.mac_win[src]
+            mac_q.append((ev.ts, ev.ssid or "", ev.rssi, ch))
+            _slide(mac_q, ev.ts, self.window)
+            _gc(self.mac_win, ev.ts, self.window)
+
+            if len(mac_q) >= self.threshold and self._ready(f"mac_{src}", ev.ts):
+                ssids = {s for _, s, _, _ in mac_q if s}
+                rate = round(len(mac_q) / self.window, 1)
+                return [Detection(
+                    RECON, SUSPICIOUS, L2, src, "", ev.ssid or "",
+                    0, ch, ev.rssi, rate,
+                    f"สแกนหา AP/Client ถี่ผิดปกติ ({len(mac_q)} probes, {len(ssids)} SSIDs ใน {self.window} วิ)",
+                    "เฝ้าระวัง, บันทึก MAC ต้นทาง (Wi-Fi Reconnaissance Scan)")]
+
+        # ตรวจสอบ Channel-wide Probe Surge / Randomized MAC Recon Flood
+        if len(ch_q) >= int(self.threshold * 1.5) and self._ready(f"ch_recon_{ch}", ev.ts):
+            unique_macs = {m for _, m, _, _ in ch_q if m}
+            unique_ssids = {s for _, _, s, _ in ch_q if s}
+            rate = round(len(ch_q) / self.window, 1)
+            primary_src = src or (ch_q[-1][1] if ch_q else "")
+            return [Detection(
+                RECON, SUSPICIOUS, L2, primary_src, "", ev.ssid or "",
+                len(unique_macs), ch, ev.rssi, rate,
+                f"ตรวจพบคลื่น Probe Scan ถี่ผิดปกติบนช่อง {ch} ({len(ch_q)} probes, {len(unique_macs)} MACs, {rate} เฟรม/วิ)",
+                "เฝ้าระวัง, ตรวจหาพิกัดผู้สแกนสัญญาณ (Randomized Probe Scanner)")]
+
+        return []
 
 
 class WpaCrackDetector(Detector):

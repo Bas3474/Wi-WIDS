@@ -58,7 +58,7 @@ hub = Hub()
 
 
 async def publish(inc: Incident) -> None:
-    inc = db.insert_incident(inc)
+    inc = await asyncio.to_thread(db.insert_incident, inc)
     await hub.broadcast({"type": "incident", "data": inc.model_dump(mode="json")})
     asyncio.create_task(line_notifier.notify(inc))
 
@@ -334,14 +334,15 @@ def ingest(body: IngestBody, x_token: Optional[str] = Header(None)):
     check_token(x_token)
     if len(body.events) > 500:
         raise HTTPException(status_code=413, detail="max 500 events per request")
-    accepted = 0
     now = time.time()
-    for e in body.events:
-        if e.kind not in KINDS:
-            continue
-        engine.feed(Event(e.kind, e.ts or now, e.src, e.dst, e.bssid, e.ssid,
-                          e.channel, e.rssi, e.extra), source=f"sensor:{body.sensor}")
-        accepted += 1
+    ev_list = [
+        Event(e.kind, e.ts or now, e.src, e.dst, e.bssid, e.ssid,
+              e.channel, e.rssi, e.extra)
+        for e in body.events if e.kind in KINDS
+    ]
+    if engine and ev_list:
+        engine.feed_batch(ev_list, source=f"sensor:{body.sensor}")
+    accepted = len(ev_list)
 
     cur = active_sensors.get(body.sensor, {"events_total": 0})
     active_sensors[body.sensor] = {

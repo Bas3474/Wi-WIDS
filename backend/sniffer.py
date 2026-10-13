@@ -178,18 +178,15 @@ class SerialWorker(threading.Thread):
         self.sensor_name = f"{sensor} ({self.port})"
         events = data.get("events", [])
         now = time.time()
-        accepted = 0
-        for e in events:
-            kind = e.get("kind", "")
-            if kind not in KINDS:
-                continue
-            self.engine.feed(
-                Event(kind, e.get("ts") or now, e.get("src", ""), e.get("dst", ""),
-                      e.get("bssid", ""), e.get("ssid", ""), int(e.get("channel") or 0),
-                      int(e.get("rssi") or 0), e.get("extra") or {}),
-                source=f"sensor:{sensor}",
-            )
-            accepted += 1
+        ev_list = [
+            Event(e.get("kind", ""), e.get("ts") or now, e.get("src", ""), e.get("dst", ""),
+                  e.get("bssid", ""), e.get("ssid", ""), int(e.get("channel") or 0),
+                  int(e.get("rssi") or 0), e.get("extra") or {})
+            for e in events if e.get("kind", "") in KINDS
+        ]
+        if ev_list:
+            self.engine.feed_batch(ev_list, source=f"sensor:{sensor}")
+        accepted = len(ev_list)
         if self.on_sensor:
             self.on_sensor(self.sensor_name, accepted, online=True, port=self.port)
 
@@ -307,8 +304,6 @@ def start_all(engine, cfg: dict, on_sensor=None) -> list:
                                           cfg.get("hop_interval_sec", 0.4)))
         else:
             log.info("ไม่พบ interface '%s' -> รับข้อมูลจาก ESP32 (สาย USB / Wi-Fi)", iface)
-    if cfg.get("net_interface") and os.name != "nt":
-        threads.append(NetSniffer(cfg["net_interface"], engine))
     for t in threads:
         t.start()
     return threads

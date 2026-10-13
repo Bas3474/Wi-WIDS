@@ -2,7 +2,6 @@
   "serial_port": "auto",
   "serial_baud": 115200,
   "interface": "",
-  "net_interface": "",
   "channels": [
     1,
     6,
@@ -19,12 +18,6 @@
       "channels": []
     }
   ],
-  "network": {
-    "gateway_ip": "192.168.1.1",
-    "gateway_mac": "",
-    "trusted_resolvers": [],
-    "dns_expected": {}
-  },
   "thresholds": {
     "deauth": {
       "window": 5.0,
@@ -32,7 +25,7 @@
     },
     "recon": {
       "window": 10.0,
-      "threshold": 25
+      "threshold": 10
     },
     "wpa": {
       "window": 30.0,
@@ -41,7 +34,10 @@
     },
     "auth_dos": {
       "window": 5.0,
-      "threshold": 15
+      "threshold": 35,
+      "min_sources": 5,
+      "single_source_threshold": 60,
+      "cooldown": 45.0
     },
     "beacon_flood": {
       "window": 5.0,

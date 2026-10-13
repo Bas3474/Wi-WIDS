@@ -4,7 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 
-from detectors import (ArpDetector, AuthDosDetector, BeaconFloodDetector, DeauthDetector, DnsDetector, Event,  # noqa: E402
+from detectors import (AuthDosDetector, BeaconFloodDetector, DeauthDetector, Event,  # noqa: E402
                        EvilTwinDetector, ReconDetector, WpaCrackDetector)
 
 AP = "AA:BB:CC:11:22:33"
@@ -85,6 +85,35 @@ class TestAuthDos(unittest.TestCase):
         out = feed_all(AuthDosDetector(threshold=15), ev)
         self.assertEqual(out, [])
 
+    def test_normal_multiple_clients_retrying_ignored(self):
+        # อุปกรณ์ปกติ 3 เครื่องต่อ Wi-Fi หรือ retry ซ้ำๆ ในหอพัก (รวม 27 เฟรม) ต้องไม่แจ้งเตือนมั่ว
+        d = AuthDosDetector(threshold=35, min_sources=5, single_source_threshold=50)
+        clients = ["11:22:33:44:55:01", "11:22:33:44:55:02", "11:22:33:44:55:03"]
+        ev = []
+        for i in range(9):
+            for c in clients:
+                ev.append(Event("auth", len(ev) * 0.1, c, AP, AP, channel=6))
+        out = feed_all(d, ev)
+        self.assertEqual(out, [])
+
+    def test_cooldown_prevents_auth_dos_spam(self):
+        # เมื่อเกิดการโจมตีอย่างต่อเนื่อง คูลดาวน์ 45 วิ ต้องไม่ทำให้แจ้งเตือนรัว
+        d = AuthDosDetector(threshold=35, min_sources=5, cooldown=45.0)
+        # ชุดที่ 1: วิที่ 0 ถึง 2 (ยิง 40 เฟรมจาก 40 MACs) -> ตรวจพบ 1 ครั้ง
+        ev1 = [Event("auth", i * 0.05, f"00:11:22:33:44:{i:02X}", AP, AP, channel=6) for i in range(40)]
+        out1 = feed_all(d, ev1)
+        self.assertEqual(len(out1), 1)
+
+        # ชุดที่ 2: วิที่ 10 ถึง 12 (ยิงอีก 40 เฟรมในคูลดาวน์) -> ต้องไม่แจ้งเตือนซ้ำ
+        ev2 = [Event("auth", 10.0 + i * 0.05, f"00:11:22:33:55:{i:02X}", AP, AP, channel=6) for i in range(40)]
+        out2 = feed_all(d, ev2)
+        self.assertEqual(out2, [])
+
+        # ชุดที่ 3: วิที่ 50 (พ้นคูลดาวน์ 45 วิแล้ว) -> ตรวจพบอีก 1 ครั้ง
+        ev3 = [Event("auth", 50.0 + i * 0.05, f"00:11:22:33:66:{i:02X}", AP, AP, channel=6) for i in range(40)]
+        out3 = feed_all(d, ev3)
+        self.assertEqual(len(out3), 1)
+
 
 class TestDeauth(unittest.TestCase):
     def test_flood_detected_once(self):
@@ -116,6 +145,9 @@ class TestDeauth(unittest.TestCase):
 
 class TestEvilTwin(unittest.TestCase):
     prof = [{"ssid": "Campus", "bssids": [AP], "channels": [6]}]
+
+    def setUp(self):
+        BeaconFloodDetector.active_floods.clear()
 
     def test_legit_ap_ok(self):
         self.assertEqual(EvilTwinDetector(self.prof).feed(Event("beacon", 1, AP, bssid=AP, ssid="Campus", channel=6)), [])
@@ -196,15 +228,47 @@ class TestEvilTwin(unittest.TestCase):
         out_after = d.feed(Event("beacon", 100, "22:33:44:55:66:77", bssid="22:33:44:55:66:77", ssid="CampusWiFi", channel=6))
         self.assertEqual(out_after, [])
 
+    def test_evil_twin_cooldown_prevents_spam(self):
+        # มี AP จริง และ Rogue AP ส่ง Beacon ซ้ำๆ ในรอบ Cooldown ต้องแจ้งเตือนเพียง 1 ครั้ง
+        d = EvilTwinDetector([])
+        d.feed(Event("beacon", 1.0, AP, bssid=AP, ssid="TestNet", channel=6))
+        # Rogue AP ส่ง beacon ซ้ำๆ 10 ครั้ง
+        ROGUE = "66:66:66:66:66:66"
+        out = []
+        for i in range(10):
+            out += d.feed(Event("beacon", 3.0 + i * 0.1, ROGUE, bssid=ROGUE, ssid="TestNet", channel=6))
+        self.assertEqual(len(out), 1)
+
+    def test_evil_twin_suppressed_during_beacon_flood(self):
+        # ขณะเกิด Beacon Flood บนช่องสัญญาณ ต้องระงับการแจ้งเตือน Evil Twin
+        BeaconFloodDetector.active_floods[6] = 10.0
+        d = EvilTwinDetector([{"ssid": "Target", "bssids": [AP], "channels": [6]}])
+        out = d.feed(Event("beacon", 10.5, "EE:EE:EE:EE:EE:EE", bssid="EE:EE:EE:EE:EE:EE", ssid="Target", channel=6))
+        self.assertEqual(out, [])
+        BeaconFloodDetector.active_floods.clear()
+
 
 class TestRecon(unittest.TestCase):
-    def test_probe_flood(self):
-        ev = [Event("probe_req", i * 0.1, ATK, ssid=f"net{i}") for i in range(60)]
-        self.assertEqual(len(feed_all(ReconDetector(), ev)), 1)
+    def test_single_mac_probe_scan_detected(self):
+        # ตรวจจับการสแกน Probe Request ถี่ผิดปกติจาก MAC เดียว (>= 10 ครั้ง ใน 10 วิ)
+        ev = [Event("probe_req", i * 0.5, ATK, ssid=f"Target_{i}", channel=6) for i in range(12)]
+        out = feed_all(ReconDetector(threshold=10), ev)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].attack_type, "Recon / Probe Flood")
+        self.assertEqual(out[0].severity, "Suspicious")
+
+    def test_randomized_mac_probe_surge_detected(self):
+        # ตรวจจับคลื่น Probe Scan ที่สุ่ม MAC Address หลากหลายรายการ
+        ev = [Event("probe_req", i * 0.2, f"00:C0:CA:11:22:{i:02X}", ssid=f"Scan_{i}", channel=6) for i in range(18)]
+        out = feed_all(ReconDetector(threshold=10), ev)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].attack_type, "Recon / Probe Flood")
+        self.assertEqual(out[0].severity, "Suspicious")
+        self.assertIn("Probe Scan", out[0].impact)
 
     def test_few_probes_ok(self):
-        ev = [Event("probe_req", i * 2.0, ATK) for i in range(10)]
-        self.assertEqual(feed_all(ReconDetector(), ev), [])
+        ev = [Event("probe_req", i * 2.0, ATK) for i in range(5)]
+        self.assertEqual(feed_all(ReconDetector(threshold=10), ev), [])
 
 
 class TestWpa(unittest.TestCase):
@@ -228,54 +292,6 @@ class TestWpa(unittest.TestCase):
         out = feed_all(WpaCrackDetector(), ev)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].severity, "Critical")
-
-
-class TestArp(unittest.TestCase):
-    def test_gateway_spoof_is_critical(self):
-        d = ArpDetector(gateway_ip="192.168.1.1")
-        out = feed_all(d, [Event("arp", 1, "AA:AA:AA:AA:AA:01", extra={"ip": "192.168.1.1"}),
-                           Event("arp", 2, "BB:BB:BB:BB:BB:02", extra={"ip": "192.168.1.1"})])
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].severity, "Critical")
-        self.assertEqual(out[0].src_mac, "BB:BB:BB:BB:BB:02")
-
-    def test_pinned_gateway_mac_flags_immediately(self):
-        d = ArpDetector("192.168.1.1", "AA:AA:AA:AA:AA:01")
-        out = d.feed(Event("arp", 1, "BB:BB:BB:BB:BB:02", extra={"ip": "192.168.1.1"}))
-        self.assertEqual(out[0].severity, "Critical")
-
-    def test_normal_arp_ok(self):
-        d = ArpDetector("192.168.1.1")
-        ev = [Event("arp", i, "AA:AA:AA:AA:AA:01", extra={"ip": "192.168.1.1"}) for i in range(5)]
-        self.assertEqual(feed_all(d, ev), [])
-
-    def test_non_gateway_conflict_is_suspicious(self):
-        d = ArpDetector("192.168.1.1")
-        out = feed_all(d, [Event("arp", 1, "AA:AA:AA:AA:AA:01", extra={"ip": "192.168.1.50"}),
-                           Event("arp", 2, "BB:BB:BB:BB:BB:02", extra={"ip": "192.168.1.50"})])
-        self.assertEqual(out[0].severity, "Suspicious")
-
-
-class TestDns(unittest.TestCase):
-    def test_expected_mismatch(self):
-        d = DnsDetector(expected={"login.campus.edu": ["10.0.0.5"]})
-        out = d.feed(Event("dns", 1, "192.168.1.1", extra={"qname": "login.campus.edu.", "answers": ["192.168.1.99"]}))
-        self.assertEqual(out[0].severity, "Critical")
-        self.assertEqual(out[0].attack_type, "Captive Portal Phishing")
-
-    def test_rogue_resolver(self):
-        d = DnsDetector(trusted_resolvers=["192.168.1.1"])
-        out = d.feed(Event("dns", 1, "192.168.1.66", extra={"qname": "a.com", "answers": ["1.2.3.4"]}))
-        self.assertEqual(out[0].severity, "Critical")
-
-    def test_public_domain_to_private_ip_suspicious(self):
-        out = DnsDetector().feed(Event("dns", 1, "192.168.1.1", extra={"qname": "google.com", "answers": ["192.168.1.99"]}))
-        self.assertEqual(out[0].severity, "Suspicious")
-
-    def test_local_domain_ok_and_public_ip_ok(self):
-        d = DnsDetector()
-        self.assertEqual(d.feed(Event("dns", 1, "x", extra={"qname": "printer.lan", "answers": ["192.168.1.9"]})), [])
-        self.assertEqual(d.feed(Event("dns", 2, "x", extra={"qname": "google.com", "answers": ["142.250.1.1"]})), [])
 
 
 if __name__ == "__main__":
